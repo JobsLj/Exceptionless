@@ -28,16 +28,14 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
             _locationPlugin = locationPlugin;
         }
 
-        public override async Task EventBatchProcessingAsync(ICollection<EventContext> contexts) {
-            var autoSessionEvents = contexts
-                .Where(c => c.Event.GetUserIdentity()?.Identity != null
-                    && String.IsNullOrEmpty(c.Event.GetSessionId())).ToList();
+        public override Task EventBatchProcessingAsync(ICollection<EventContext> contexts) {
+            var autoSessionEvents = contexts.Where(c => !String.IsNullOrWhiteSpace(c.Event.GetUserIdentity()?.Identity) && String.IsNullOrEmpty(c.Event.GetSessionId())).ToList();
+            var manualSessionsEvents = contexts.Where(c => !String.IsNullOrEmpty(c.Event.GetSessionId())).ToList();
 
-            var manualSessionsEvents = contexts
-                .Where(c => !String.IsNullOrEmpty(c.Event.GetSessionId())).ToList();
-            
-            await ProcessAutoSessionsAsync(autoSessionEvents).AnyContext();
-            await ProcessManualSessionsAsync(manualSessionsEvents).AnyContext();
+            return Task.WhenAll(
+                ProcessAutoSessionsAsync(autoSessionEvents), 
+                ProcessManualSessionsAsync(manualSessionsEvents)
+            );
         }
 
         private async Task ProcessManualSessionsAsync(ICollection<EventContext> contexts) {
@@ -50,14 +48,14 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
 
                 var firstSessionEvent = session.First();
                 var lastSessionEvent = session.Last();
-                
+
                 // cancel duplicate start events (1 per session id)
                 session.Where(ev => ev.Event.IsSessionStart()).Skip(1).ForEach(ev => {
                     _logger.Warn().Project(projectId).Message("Discarding duplicate session start events.").Write();
                     ev.IsCancelled = true;
                 });
                 var sessionStartEvent = session.FirstOrDefault(ev => ev.Event.IsSessionStart());
-                
+
                 // sync the session start event with the first session event.
                 if (sessionStartEvent != null)
                     sessionStartEvent.Event.Date = firstSessionEvent.Event.Date;
@@ -77,7 +75,7 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
                 session.Where(ev => ev.Event.IsSessionHeartbeat()).ForEach(ctx => ctx.Event.IsHidden = true);
 
                 // try to update an existing session
-                var sessionStartEventId = await UpdateSessionStartEventAsync(projectId, session.Key, lastSessionEvent.Event.Date.UtcDateTime, sessionEndEvent != null).AnyContext();
+                string sessionStartEventId = await UpdateSessionStartEventAsync(projectId, session.Key, lastSessionEvent.Event.Date.UtcDateTime, sessionEndEvent != null).AnyContext();
 
                 // do we already have a session start for this session id?
                 if (!String.IsNullOrEmpty(sessionStartEventId) && sessionStartEvent != null) {
@@ -106,7 +104,7 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
         private async Task ProcessAutoSessionsAsync(ICollection<EventContext> contexts) {
             var identityGroups = contexts
                 .OrderBy(c => c.Event.Date)
-                .GroupBy(c => c.Event.GetUserIdentity()?.Identity);
+                .GroupBy(c => c.Event.GetUserIdentity().Identity);
 
             foreach (var identityGroup in identityGroups) {
                 string projectId = identityGroup.First().Project.Id;
@@ -123,11 +121,11 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
                         ev.IsCancelled = true;
                     });
                     var sessionStartEvent = session.FirstOrDefault(ev => ev.Event.IsSessionStart());
-                    
+
                     // sync the session start event with the first session event.
                     if (sessionStartEvent != null)
                         sessionStartEvent.Event.Date = firstSessionEvent.Event.Date;
-                    
+
                     // mark the heart beat events as hidden. This will cause new stacks to be marked as hidden, otherwise this value will be reset by the stack.
                     session.Where(ev => ev.Event.IsSessionHeartbeat()).ForEach(ctx => ctx.Event.IsHidden = true);
 
@@ -171,14 +169,14 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
             }
         }
 
-        public override async Task EventProcessedAsync(EventContext context) {
+        public override Task EventProcessedAsync(EventContext context) {
             if (context.GetProperty("SetSessionStartEventId") != null)
-                await SetSessionStartEventIdAsync(context.Project.Id, context.Event.GetSessionId(), context.Event.Id).AnyContext();
+                return SetSessionStartEventIdAsync(context.Project.Id, context.Event.GetSessionId(), context.Event.Id);
 
-            await base.EventProcessedAsync(context).AnyContext();
+            return Task.CompletedTask;
         }
 
-        private static List<List<EventContext>> CreateSessionGroups(IGrouping<String, EventContext> identityGroup) {
+        private static List<List<EventContext>> CreateSessionGroups(IGrouping<string, EventContext> identityGroup) {
             var sessions = new List<List<EventContext>>();
             var currentSession = new List<EventContext>();
             sessions.Add(currentSession);
@@ -210,8 +208,8 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
             return eventId;
         }
 
-        private async Task SetSessionStartEventIdAsync(string projectId, string sessionId, string eventId) {
-            await _cache.SetAsync<string>(GetSessionStartEventIdCacheKey(projectId, sessionId), eventId, TimeSpan.FromDays(1)).AnyContext();
+        private Task SetSessionStartEventIdAsync(string projectId, string sessionId, string eventId) {
+            return _cache.SetAsync<string>(GetSessionStartEventIdCacheKey(projectId, sessionId), eventId, TimeSpan.FromDays(1));
         }
 
         private string GetIdentitySessionIdCacheKey(string projectId, string identity) {
@@ -222,34 +220,37 @@ namespace Exceptionless.Core.Plugins.EventProcessor.Default {
             string cacheKey = GetIdentitySessionIdCacheKey(projectId, identity);
             string sessionId = await _cache.GetAsync<string>(cacheKey, null).AnyContext();
             if (!String.IsNullOrEmpty(sessionId)) {
-                await _cache.SetExpirationAsync(cacheKey, _sessionTimeout).AnyContext();
-                await _cache.SetExpirationAsync(GetSessionStartEventIdCacheKey(projectId, sessionId), TimeSpan.FromDays(1)).AnyContext();
+                await Task.WhenAll(
+                    _cache.SetExpirationAsync(cacheKey, _sessionTimeout),
+                    _cache.SetExpirationAsync(GetSessionStartEventIdCacheKey(projectId, sessionId), TimeSpan.FromDays(1))
+                ).AnyContext();
             }
 
             return sessionId;
         }
 
-        private async Task SetIdentitySessionIdAsync(string projectId, string identity, string sessionId) {
-            await _cache.SetAsync<string>(GetIdentitySessionIdCacheKey(projectId, identity), sessionId, _sessionTimeout).AnyContext();
+        private Task SetIdentitySessionIdAsync(string projectId, string identity, string sessionId) {
+            return _cache.SetAsync<string>(GetIdentitySessionIdCacheKey(projectId, identity), sessionId, _sessionTimeout);
         }
 
         private async Task<PersistentEvent> CreateSessionStartEventAsync(EventContext startContext, DateTime? lastActivityUtc, bool? isSessionEnd) {
             var startEvent = startContext.Event.ToSessionStartEvent(lastActivityUtc, isSessionEnd, startContext.Organization.HasPremiumFeatures);
-            
             var startEventContexts = new List<EventContext> {
                 new EventContext(startEvent) { Project = startContext.Project, Organization = startContext.Organization }
             };
 
-            await _assignToStack.ProcessBatchAsync(startEventContexts).AnyContext();
-            await _updateStats.ProcessBatchAsync(startEventContexts).AnyContext();
+            if (_assignToStack.Enabled)
+                await _assignToStack.ProcessBatchAsync(startEventContexts).AnyContext();
+            if (_updateStats.Enabled)
+                await _updateStats.ProcessBatchAsync(startEventContexts).AnyContext();
             await _eventRepository.AddAsync(startEvent).AnyContext();
-            await _locationPlugin.EventBatchProcessedAsync(startEventContexts).AnyContext();
+            if (_locationPlugin.Enabled)
+                await _locationPlugin.EventBatchProcessedAsync(startEventContexts).AnyContext();
 
             await SetSessionStartEventIdAsync(startContext.Project.Id, startContext.Event.GetSessionId(), startEvent.Id).AnyContext();
-
             return startEvent;
         }
-        
+
         private async Task<string> UpdateSessionStartEventAsync(string projectId, string sessionId, DateTime lastActivityUtc, bool isSessionEnd = false, bool hasError = false) {
             string sessionStartEventId = await GetSessionStartEventIdAsync(projectId, sessionId).AnyContext();
             if (!String.IsNullOrEmpty(sessionStartEventId)) {

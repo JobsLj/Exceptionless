@@ -10,11 +10,14 @@ using Exceptionless.Core.Models;
 using Exceptionless.Core.Models.Data;
 using Exceptionless.Tests.Utility;
 using Foundatio.Logging;
+using Foundatio.Repositories;
 using Foundatio.Repositories.Models;
 using Foundatio.Repositories.Utility;
 using Foundatio.Utility;
+using Nest;
 using Xunit;
 using Xunit.Abstractions;
+using LogLevel = Foundatio.Logging.LogLevel;
 
 namespace Exceptionless.Api.Tests.Repositories {
     public sealed class EventRepositoryTests : ElasticTestBase {
@@ -26,17 +29,28 @@ namespace Exceptionless.Api.Tests.Repositories {
             _stackRepository = GetService<IStackRepository>();
         }
 
-        [Fact (Skip = "https://github.com/elastic/elasticsearch-net/issues/2242")]
+        [Fact (Skip = "https://github.com/elastic/elasticsearch-net/issues/2463")]
         public async Task GetAsync() {
             Log.SetLogLevel<EventRepository>(LogLevel.Trace);
-            var ev = await _repository.AddAsync(new PersistentEvent { CreatedUtc = SystemClock.UtcNow, Date = new DateTimeOffset(SystemClock.UtcNow.Date, TimeSpan.Zero)});
+            var ev = await _repository.AddAsync(new PersistentEvent {
+                CreatedUtc = SystemClock.UtcNow,
+                Date = new DateTimeOffset(SystemClock.UtcNow.Date, TimeSpan.Zero),
+                OrganizationId = TestConstants.OrganizationId,
+                ProjectId = TestConstants.ProjectId,
+                StackId = TestConstants.StackId,
+                Type = Event.KnownTypes.Log,
+                Count = Int32.MaxValue,
+                Value = Decimal.MaxValue,
+                Geo = "40,-70"
+            });
+
             Assert.Equal(ev, await _repository.GetByIdAsync(ev.Id));
         }
 
         [Fact(Skip="Performance Testing")]
-        public async Task GetAsyncPerformance() {
+        public async Task GetAsyncPerformanceAsync() {
             var ev = await _repository.AddAsync(new RandomEventGenerator().GeneratePersistent());
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             Assert.Equal(1, await _repository.CountAsync());
 
             var sw = Stopwatch.StartNew();
@@ -56,15 +70,15 @@ namespace Exceptionless.Api.Tests.Repositories {
                 events.Add(EventData.GenerateEvent(projectId: TestConstants.ProjectId, organizationId: TestConstants.OrganizationId, stackId: TestConstants.StackId, occurrenceDate: SystemClock.UtcNow.Subtract(TimeSpan.FromMinutes(i))));
 
             await _repository.AddAsync(events);
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             Assert.Equal(events.Count, await _repository.CountAsync());
 
-            var results = await _repository.GetByOrganizationIdAsync(TestConstants.OrganizationId, new PagingOptions().WithPage(2).WithLimit(2));
+            var results = await _repository.GetByOrganizationIdAsync(TestConstants.OrganizationId, o => o.PageNumber(2).PageLimit(2));
             Assert.Equal(2, results.Documents.Count);
             Assert.Equal(results.Documents.First().Id, events[2].Id);
             Assert.Equal(results.Documents.Last().Id, events[3].Id);
 
-            results = await _repository.GetByOrganizationIdAsync(TestConstants.OrganizationId, new PagingOptions().WithPage(3).WithLimit(2));
+            results = await _repository.GetByOrganizationIdAsync(TestConstants.OrganizationId, o => o.PageNumber(3).PageLimit(2));
             Assert.Equal(2, results.Documents.Count);
             Assert.Equal(results.Documents.First().Id, events[4].Id);
             Assert.Equal(results.Documents.Last().Id, events[5].Id);
@@ -80,13 +94,13 @@ namespace Exceptionless.Api.Tests.Repositories {
 
             _logger.Debug("");
             _logger.Debug("Sorted order:");
-            List<Tuple<string, DateTime>> sortedIds = _ids.OrderBy(t => t.Item2.Ticks).ThenBy(t => t.Item1).ToList();
+            var sortedIds = _ids.OrderBy(t => t.Item2.Ticks).ThenBy(t => t.Item1).ToList();
             foreach (var t in sortedIds)
                 _logger.Debug("{0}: {1}", t.Item1, t.Item2.ToLongTimeString());
 
             _logger.Debug("");
             _logger.Debug("Tests:");
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             Assert.Equal(_ids.Count, await _repository.CountAsync());
             for (int i = 0; i < sortedIds.Count; i++) {
                 _logger.Debug("Current - {0}: {1}", sortedIds[i].Item1, sortedIds[i].Item2.ToLongTimeString());
@@ -107,13 +121,13 @@ namespace Exceptionless.Api.Tests.Repositories {
 
             _logger.Debug("");
             _logger.Debug("Sorted order:");
-            List<Tuple<string, DateTime>> sortedIds = _ids.OrderBy(t => t.Item2.Ticks).ThenBy(t => t.Item1).ToList();
+            var sortedIds = _ids.OrderBy(t => t.Item2.Ticks).ThenBy(t => t.Item1).ToList();
             foreach (var t in sortedIds)
                 _logger.Debug("{0}: {1}", t.Item1, t.Item2.ToLongTimeString());
 
             _logger.Debug("");
             _logger.Debug("Tests:");
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             Assert.Equal(_ids.Count, await _repository.CountAsync());
             for (int i = 0; i < sortedIds.Count; i++) {
                 _logger.Debug("Current - {0}: {1}", sortedIds[i].Item1, sortedIds[i].Item2.ToLongTimeString());
@@ -130,7 +144,7 @@ namespace Exceptionless.Api.Tests.Repositories {
             string referenceId = ObjectId.GenerateNewId().ToString();
             await _repository.AddAsync(EventData.GenerateEvents(3, TestConstants.OrganizationId, TestConstants.ProjectId, TestConstants.StackId2, referenceId: referenceId).ToList());
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             var results = await _repository.GetByReferenceIdAsync(TestConstants.ProjectId, referenceId);
             Assert.True(results.Total > 0);
             Assert.NotNull(results.Documents.First());
@@ -158,7 +172,7 @@ namespace Exceptionless.Api.Tests.Repositories {
 
             await _repository.AddAsync(events);
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             var results = await _repository.GetOpenSessionsAsync(SystemClock.UtcNow.SubtractMinutes(30));
             Assert.Equal(3, results.Total);
         }
@@ -166,37 +180,37 @@ namespace Exceptionless.Api.Tests.Repositories {
         [Fact]
         public async Task CanMarkAsFixedAsync() {
             const int NUMBER_OF_EVENTS_TO_CREATE = 10000;
-            await _repository.AddAsync(EventData.GenerateEvents(NUMBER_OF_EVENTS_TO_CREATE, TestConstants.OrganizationId, TestConstants.ProjectId, TestConstants.StackId2).ToList(), sendNotification: false);
+            await _repository.AddAsync(EventData.GenerateEvents(NUMBER_OF_EVENTS_TO_CREATE, TestConstants.OrganizationId, TestConstants.ProjectId, TestConstants.StackId2).ToList(), o => o.Notifications(false));
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             Assert.Equal(NUMBER_OF_EVENTS_TO_CREATE, await _repository.CountAsync());
 
             var sw = Stopwatch.StartNew();
             await _repository.UpdateFixedByStackAsync(TestConstants.OrganizationId, TestConstants.ProjectId, TestConstants.StackId2, false, sendNotifications: false);
             _logger.Info(() => $"Time to mark not fixed events as not fixed: {sw.ElapsedMilliseconds}ms");
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             sw.Restart();
 
             await _repository.UpdateFixedByStackAsync(TestConstants.OrganizationId, TestConstants.ProjectId, TestConstants.StackId2, true, sendNotifications: false);
             _logger.Info(() => $"Time to mark not fixed events as fixed: {sw.ElapsedMilliseconds}ms");
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             sw.Stop();
-            
+
             var results = await GetByFilterAsync($"stack:{TestConstants.StackId2} fixed:true");
             Assert.Equal(NUMBER_OF_EVENTS_TO_CREATE, results.Total);
         }
-        
+
         [Fact]
         public async Task RemoveAllByClientIpAndDateAsync() {
-            const string _clientIpAddress = "123.123.12.256";
+            const string _clientIpAddress = "123.123.12.255";
 
             const int NUMBER_OF_EVENTS_TO_CREATE = 50;
             var events = EventData.GenerateEvents(NUMBER_OF_EVENTS_TO_CREATE, TestConstants.OrganizationId, TestConstants.ProjectId, TestConstants.StackId2, isFixed: true, startDate: SystemClock.UtcNow.SubtractDays(2), endDate: SystemClock.UtcNow).ToList();
             events.ForEach(e => e.AddRequestInfo(new RequestInfo { ClientIpAddress = _clientIpAddress }));
             await _repository.AddAsync(events);
 
-            await _configuration.Client.RefreshAsync();
-            events = (await _repository.GetByProjectIdAsync(TestConstants.ProjectId, new PagingOptions().WithLimit(NUMBER_OF_EVENTS_TO_CREATE))).Documents.ToList();
+            await _configuration.Client.RefreshAsync(Indices.All);
+            events = (await _repository.GetByProjectIdAsync(TestConstants.ProjectId, o => o.PageLimit(NUMBER_OF_EVENTS_TO_CREATE))).Documents.ToList();
             Assert.Equal(NUMBER_OF_EVENTS_TO_CREATE, events.Count);
             events.ForEach(e => {
                 Assert.False(e.IsHidden);
@@ -207,8 +221,8 @@ namespace Exceptionless.Api.Tests.Repositories {
 
             await _repository.HideAllByClientIpAndDateAsync(TestConstants.OrganizationId, _clientIpAddress, SystemClock.UtcNow.SubtractDays(3), SystemClock.UtcNow.AddDays(2));
 
-            await _configuration.Client.RefreshAsync();
-            events = (await _repository.GetByProjectIdAsync(TestConstants.ProjectId, new PagingOptions().WithLimit(NUMBER_OF_EVENTS_TO_CREATE))).Documents.ToList();
+            await _configuration.Client.RefreshAsync(Indices.All);
+            events = (await _repository.GetByProjectIdAsync(TestConstants.ProjectId, o => o.PageLimit(NUMBER_OF_EVENTS_TO_CREATE))).Documents.ToList();
             Assert.Equal(NUMBER_OF_EVENTS_TO_CREATE, events.Count);
             events.ForEach(e => Assert.True(e.IsHidden));
         }
@@ -216,7 +230,7 @@ namespace Exceptionless.Api.Tests.Repositories {
         private readonly List<Tuple<string, DateTime>> _ids = new List<Tuple<string, DateTime>>();
 
         private async Task CreateDataAsync() {
-            var baseDate = SystemClock.UtcNow;
+            var baseDate = SystemClock.UtcNow.SubtractHours(1);
             var occurrenceDateStart = baseDate.AddMinutes(-30);
             var occurrenceDateMid = baseDate;
             var occurrenceDateEnd = baseDate.AddMinutes(30);
@@ -243,9 +257,9 @@ namespace Exceptionless.Api.Tests.Repositories {
                 _ids.Add(Tuple.Create(ev.Id, date));
             }
         }
-        
+
         private Task<FindResults<PersistentEvent>> GetByFilterAsync(string filter) {
-            return _repository.GetByFilterAsync(null, filter, new SortingOptions(), null, DateTime.MinValue, DateTime.MaxValue, new PagingOptions());
+            return _repository.GetByFilterAsync(null, filter, null, null, DateTime.MinValue, DateTime.MaxValue);
         }
     }
 }

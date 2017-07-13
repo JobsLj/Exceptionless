@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Models.Data;
+using Newtonsoft.Json;
 
 namespace Exceptionless {
     public static class EventExtensions {
@@ -51,7 +53,7 @@ namespace Exceptionless {
         }
 
         /// <summary>
-        /// Indicates wether the event has been marked as critical.
+        /// Indicates whether the event has been marked as critical.
         /// </summary>
         public static bool IsCritical(this Event ev) {
             return ev.Tags != null && ev.Tags.Contains(Event.KnownTags.Critical);
@@ -130,13 +132,11 @@ namespace Exceptionless {
         /// Gets the user info object from extended data.
         /// </summary>
         public static UserInfo GetUserIdentity(this Event ev) {
-            object value;
-            return ev.Data.TryGetValue(Event.KnownDataKeys.UserInfo, out value) ? value as UserInfo : null;
+            return ev.Data.TryGetValue(Event.KnownDataKeys.UserInfo, out object value) ? value as UserInfo : null;
         }
 
         public static string GetVersion(this Event ev) {
-            object value;
-            return ev.Data.TryGetValue(Event.KnownDataKeys.Version, out value) ? value as string : null;
+            return ev.Data.TryGetValue(Event.KnownDataKeys.Version, out object value) ? value as string : null;
         }
 
         /// <summary>
@@ -152,10 +152,17 @@ namespace Exceptionless {
         }
 
         public static Location GetLocation(this Event ev) {
-            object value;
-            return ev.Data.TryGetValue(Event.KnownDataKeys.Location, out value) ? value as Location : null;
+            return ev.Data.TryGetValue(Event.KnownDataKeys.Location, out object value) ? value as Location : null;
         }
-        
+
+        public static string GetLevel(this Event ev) {
+            return ev.Data.TryGetValue(Event.KnownDataKeys.Level, out object value) ? value as string : null;
+        }
+
+        public static string GetSubmissionMethod(this Event ev) {
+            return ev.Data.TryGetValue(Event.KnownDataKeys.SubmissionMethod, out object value) ? value as string : null;
+        }
+
         public static void SetLocation(this Event ev, Location location) {
             if (location == null)
                 return;
@@ -169,15 +176,14 @@ namespace Exceptionless {
 
             ev.Data[Event.KnownDataKeys.EnvironmentInfo] = environmentInfo;
         }
-        
+
         /// <summary>
         /// Gets the stacking info from extended data.
         /// </summary>
         public static ManualStackingInfo GetManualStackingInfo(this Event ev) {
-            object value;
-            return ev.Data.TryGetValue(Event.KnownDataKeys.ManualStackingInfo, out value) ? value as ManualStackingInfo : null;
+            return ev.Data.TryGetValue(Event.KnownDataKeys.ManualStackingInfo, out object value) ? value as ManualStackingInfo : null;
         }
-        
+
         /// <summary>
         /// Changes default stacking behavior
         /// </summary>
@@ -266,8 +272,7 @@ namespace Exceptionless {
         /// Gets the user description from extended data.
         /// </summary>
         public static UserDescription GetUserDescription(this Event ev) {
-            object value;
-            return ev.Data.TryGetValue(Event.KnownDataKeys.UserDescription, out value) ? value as UserDescription : null;
+            return ev.Data.TryGetValue(Event.KnownDataKeys.UserDescription, out object value) ? value as UserDescription : null;
         }
 
         /// <summary>
@@ -293,6 +298,10 @@ namespace Exceptionless {
                 return;
 
             ev.Data[Event.KnownDataKeys.UserDescription] = description;
+        }
+
+        public static byte[] GetBytes(this Event ev, JsonSerializerSettings settings) {
+            return Encoding.UTF8.GetBytes(ev.ToJson(Formatting.None, settings));
         }
     }
 }

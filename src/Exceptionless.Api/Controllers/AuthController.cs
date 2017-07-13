@@ -18,6 +18,7 @@ using Exceptionless.DateTimeExtensions;
 using FluentValidation;
 using Foundatio.Caching;
 using Foundatio.Logging;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 using Newtonsoft.Json.Linq;
 using OAuth2.Client;
@@ -29,8 +30,8 @@ using OAuth2.Models;
 namespace Exceptionless.Api.Controllers {
     [RoutePrefix(API_PREFIX + "/auth")]
     public class AuthController : ExceptionlessApiController {
-	    private readonly IDomainLoginProvider _domainLoginProvider;
-	    private readonly IOrganizationRepository _organizationRepository;
+        private readonly IDomainLoginProvider _domainLoginProvider;
+        private readonly IOrganizationRepository _organizationRepository;
         private readonly IUserRepository _userRepository;
         private readonly ITokenRepository _tokenRepository;
         private readonly ICacheClient _cache;
@@ -40,8 +41,8 @@ namespace Exceptionless.Api.Controllers {
         private static bool _isFirstUserChecked;
 
         public AuthController(IOrganizationRepository organizationRepository, IUserRepository userRepository, ITokenRepository tokenRepository, ICacheClient cacheClient, IMailer mailer, ILogger<AuthController> logger, IDomainLoginProvider domainLoginProvider) {
-	        _domainLoginProvider = domainLoginProvider;
-	        _organizationRepository = organizationRepository;
+            _domainLoginProvider = domainLoginProvider;
+            _organizationRepository = organizationRepository;
             _userRepository = userRepository;
             _tokenRepository = tokenRepository;
             _cache = new ScopedCacheClient(cacheClient, "Auth");
@@ -70,18 +71,19 @@ namespace Exceptionless.Api.Controllers {
         [Route("login")]
         [ResponseType(typeof(TokenResult))]
         public async Task<IHttpActionResult> LoginAsync(LoginModel model) {
-            if (String.IsNullOrWhiteSpace(model?.Email)) {
+            string email = model?.Email?.Trim().ToLowerInvariant();
+            if (String.IsNullOrEmpty(email)) {
                 _logger.Error().Message("Login failed: Email Address is required.").Tag("Login").SetActionContext(ActionContext).Write();
                 return BadRequest("Email Address is required.");
             }
-            
+
             if (String.IsNullOrWhiteSpace(model.Password)) {
-                _logger.Error().Message("Login failed for \"{0}\": Password is required.", model.Email).Tag("Login").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Login failed for \"{0}\": Password is required.", email).Tag("Login").Identity(email).SetActionContext(ActionContext).Write();
                 return BadRequest("Password is required.");
             }
-            
+
             // Only allow 5 password attempts per 15 minute period.
-            string userLoginAttemptsCacheKey = $"user:{model.Email}:attempts";
+            string userLoginAttemptsCacheKey = $"user:{email}:attempts";
             long userLoginAttempts = await _cache.IncrementAsync(userLoginAttemptsCacheKey, 1, SystemClock.UtcNow.Ceiling(TimeSpan.FromMinutes(15)));
 
             // Only allow 15 login attempts per 15 minute period by a single ip.
@@ -89,25 +91,25 @@ namespace Exceptionless.Api.Controllers {
             long ipLoginAttempts = await _cache.IncrementAsync(ipLoginAttemptsCacheKey, 1, SystemClock.UtcNow.Ceiling(TimeSpan.FromMinutes(15)));
 
             if (userLoginAttempts > 5) {
-                _logger.Error().Message("Login denied for \"{0}\" for the {1} time.", model.Email, userLoginAttempts).Tag("Login").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Login denied for \"{0}\" for the {1} time.", email, userLoginAttempts).Tag("Login").Identity(email).SetActionContext(ActionContext).Write();
                 return Unauthorized();
             }
 
             if (ipLoginAttempts > 15) {
-                _logger.Error().Message("Login denied for \"{0}\" for the {1} time.", Request.GetClientIpAddress(), ipLoginAttempts).Tag("Login").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Login denied for \"{0}\" for the {1} time.", Request.GetClientIpAddress(), ipLoginAttempts).Tag("Login").Identity(email).SetActionContext(ActionContext).Write();
                 return Unauthorized();
             }
 
-	        User user;
+            User user;
             try {
-                user = await _userRepository.GetByEmailAddressAsync(model.Email);
+                user = await _userRepository.GetByEmailAddressAsync(email);
             } catch (Exception ex) {
-                _logger.Error().Exception(ex).Critical().Message("Login failed for \"{0}\": {1}", model.Email, ex.Message).Tag("Login").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Exception(ex).Critical().Message("Login failed for \"{0}\": {1}", email, ex.Message).Tag("Login").Identity(email).SetActionContext(ActionContext).Write();
                 return Unauthorized();
             }
 
             if (user == null) {
-                _logger.Error().Message("Login failed for \"{0}\": User not found.", model.Email).Tag("Login").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Login failed for \"{0}\": User not found.", email).Tag("Login").Identity(email).SetActionContext(ActionContext).Write();
                 return Unauthorized();
             }
 
@@ -128,7 +130,7 @@ namespace Exceptionless.Api.Controllers {
                     return Unauthorized();
                 }
             } else {
-                if (!IsValidActiveDirectoryLogin(model.Email, model.Password)) {
+                if (!IsValidActiveDirectoryLogin(email, model.Password)) {
                     _logger.Error().Message("Domain login failed for \"{0}\": Invalid Password or Account.", user.EmailAddress).Tag("Login").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
                     return Unauthorized();
                 }
@@ -136,47 +138,70 @@ namespace Exceptionless.Api.Controllers {
 
             if (!String.IsNullOrEmpty(model.InviteToken))
                 await AddInvitedUserToOrganizationAsync(model.InviteToken, user);
-            
+
             await _cache.RemoveAsync(userLoginAttemptsCacheKey);
+            await _cache.IncrementAsync(ipLoginAttemptsCacheKey, -1, SystemClock.UtcNow.Ceiling(TimeSpan.FromMinutes(15)));
 
             _logger.Info().Message("\"{0}\" logged in.", user.EmailAddress).Tag("Login").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
             return Ok(new TokenResult { Token = await GetTokenAsync(user) });
         }
 
+        [ApiExplorerSettings(IgnoreApi = true)]
+        [HttpGet]
+        [Route("logout")]
+        [Authorize(Roles = AuthorizationRoles.User)]
+        public async Task<IHttpActionResult> LogoutAsync() {
+            if (User.IsTokenAuthType())
+                return Ok();
+
+            string id = User.GetLoggedInUsersTokenId();
+            if (String.IsNullOrEmpty(id))
+                return Ok();
+
+            try {
+                await _tokenRepository.RemoveAsync(id);
+            } catch (Exception ex) {
+                _logger.Error().Exception(ex).Critical().Message("Logout failed for \"{0}\": {1}", CurrentUser.EmailAddress, ex.Message).Tag("Logout").Identity(CurrentUser.EmailAddress).SetActionContext(ActionContext).Write();
+            }
+
+            return Ok();
+        }
+
         /// <summary>
-        /// Signup
+        /// Sign up
         /// </summary>
-        /// <param name="model">The signup model.</param>
-        /// <response code="400">The signup model is invalid.</response>
-        /// <response code="401">Signup failed.</response>
+        /// <param name="model">The sign up model.</param>
+        /// <response code="400">The sign up model is invalid.</response>
+        /// <response code="401">Sign up failed.</response>
         [HttpPost]
         [Route("signup")]
         [ResponseType(typeof(TokenResult))]
         public async Task<IHttpActionResult> SignupAsync(SignupModel model) {
-            var valid = await IsAccountCreationEnabledAsync(model?.InviteToken);
+            bool valid = await IsAccountCreationEnabledAsync(model?.InviteToken);
             if (!valid)
                 return BadRequest("Account Creation is currently disabled.");
 
-            if (String.IsNullOrWhiteSpace(model?.Email)) {
+            string email = model?.Email?.Trim().ToLowerInvariant();
+            if (String.IsNullOrEmpty(email)) {
                 _logger.Error().Message("Signup failed: Email Address is required.").Tag("Signup").Property("Name", model != null ? model.Name : "<null>").SetActionContext(ActionContext).Write();
                 return BadRequest("Email Address is required.");
             }
 
             if (String.IsNullOrWhiteSpace(model.Name)) {
-                _logger.Error().Message("Signup failed for \"{0}\": Name is required.", model.Email).Tag("Signup").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Signup failed for \"{0}\": Name is required.", email).Tag("Signup").Identity(email).SetActionContext(ActionContext).Write();
                 return BadRequest("Name is required.");
             }
 
             if (!IsValidPassword(model.Password)) {
-                _logger.Error().Message("Signup failed for \"{0}\": Invalid Password", model.Email).Tag("Signup").Identity(model.Email).Property("Password Length", model.Password?.Length ?? 0).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Signup failed for \"{0}\": Invalid Password", email).Tag("Signup").Identity(email).Property("Password Length", model.Password?.Length ?? 0).SetActionContext(ActionContext).Write();
                 return BadRequest("Password must be at least 6 characters long.");
             }
 
             User user;
             try {
-                user = await _userRepository.GetByEmailAddressAsync(model.Email);
+                user = await _userRepository.GetByEmailAddressAsync(email);
             } catch (Exception ex) {
-                _logger.Error().Exception(ex).Critical().Message("Signup failed for \"{0}\": {1}", model.Email, ex.Message).Tag("Signup").Identity(model.Email).SetActionContext(ActionContext).Write();
+                _logger.Error().Exception(ex).Critical().Message("Signup failed for \"{0}\": {1}", email, ex.Message).Tag("Signup").Identity(email).SetActionContext(ActionContext).Write();
                 return BadRequest();
             }
 
@@ -186,23 +211,23 @@ namespace Exceptionless.Api.Controllers {
             string ipSignupAttemptsCacheKey = $"ip:{Request.GetClientIpAddress()}:signup:attempts";
             bool hasValidInviteToken = !String.IsNullOrWhiteSpace(model.InviteToken) && await _organizationRepository.GetByInviteTokenAsync(model.InviteToken) != null;
             if (!hasValidInviteToken) {
-                // Only allow 10 signups per hour period by a single ip.
+                // Only allow 10 sign ups per hour period by a single ip.
                 long ipSignupAttempts = await _cache.IncrementAsync(ipSignupAttemptsCacheKey, 1, SystemClock.UtcNow.Ceiling(TimeSpan.FromHours(1)));
                 if (ipSignupAttempts > 10) {
-                    _logger.Error().Message("Signup denied for \"{0}\" for the {1} time.", model.Email, ipSignupAttempts).Tag("Signup").Identity(model.Email).SetActionContext(ActionContext).Write();
+                    _logger.Error().Message("Signup denied for \"{0}\" for the {1} time.", email, ipSignupAttempts).Tag("Signup").Identity(email).SetActionContext(ActionContext).Write();
                     return BadRequest();
                 }
             }
 
-	        if (Settings.Current.EnableActiveDirectoryAuth && !IsValidActiveDirectoryLogin(model.Email, model.Password)) {
-				_logger.Error().Message("Signup failed for \"{0}\": Active Directory authentication failed.", model.Email).Tag("Signup").Identity(model.Email).SetActionContext(ActionContext).Write();
+            if (Settings.Current.EnableActiveDirectoryAuth && !IsValidActiveDirectoryLogin(email, model.Password)) {
+                _logger.Error().Message("Signup failed for \"{0}\": Active Directory authentication failed.", email).Tag("Signup").Identity(email).SetActionContext(ActionContext).Write();
                 return BadRequest();
             }
 
             user = new User {
                 IsActive = true,
-                FullName = model.Name,
-                EmailAddress = model.Email,
+                FullName = model.Name.Trim(),
+                EmailAddress = email,
                 IsEmailAddressVerified = Settings.Current.EnableActiveDirectoryAuth
             };
             user.CreateVerifyEmailAddressToken();
@@ -210,27 +235,27 @@ namespace Exceptionless.Api.Controllers {
             user.Roles.Add(AuthorizationRoles.User);
             await AddGlobalAdminRoleIfFirstUserAsync(user);
 
-	        if (!Settings.Current.EnableActiveDirectoryAuth) {
-				user.Salt = Core.Extensions.StringExtensions.GetRandomString(16);
-				user.Password = model.Password.ToSaltedHash(user.Salt);
-			}
-            
+            if (!Settings.Current.EnableActiveDirectoryAuth) {
+                user.Salt = Core.Extensions.StringExtensions.GetRandomString(16);
+                user.Password = model.Password.ToSaltedHash(user.Salt);
+            }
+
             try {
-                user = await _userRepository.AddAsync(user, true);
+                user = await _userRepository.AddAsync(user, o => o.Cache());
             } catch (ValidationException ex) {
-                var errors = String.Join(", ", ex.Errors);
-                _logger.Error().Critical().Message("Signup failed for \"{0}\": {1}", model.Email, errors).Tag("Signup").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
+                string errors = String.Join(", ", ex.Errors);
+                _logger.Error().Critical().Message("Signup failed for \"{0}\": {1}", email, errors).Tag("Signup").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
                 return BadRequest(errors);
             } catch (Exception ex) {
-                _logger.Error().Exception(ex).Critical().Message("Signup failed for \"{0}\": {1}", model.Email, ex.Message).Tag("Signup").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
+                _logger.Error().Exception(ex).Critical().Message("Signup failed for \"{0}\": {1}", email, ex.Message).Tag("Signup").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
                 return BadRequest("An error occurred.");
             }
-            
+
             if (hasValidInviteToken)
                 await AddInvitedUserToOrganizationAsync(model.InviteToken, user);
 
             if (!user.IsEmailAddressVerified)
-                await _mailer.SendVerifyEmailAsync(user);
+                await _mailer.SendUserEmailVerifyAsync(user);
 
             _logger.Info().Message("\"{0}\" signed up.", user.EmailAddress).Tag("Signup").Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
             return Ok(new TokenResult { Token = await GetTokenAsync(user) });
@@ -268,26 +293,41 @@ namespace Exceptionless.Api.Controllers {
             return ExternalLoginAsync(value.ToObject<ExternalAuthInfo>(), Settings.Current.MicrosoftAppId, Settings.Current.MicrosoftAppSecret, (f, c) => new WindowsLiveClient(f, c));
         }
 
+        /// <summary>
+        /// Removes an external login provider from the account
+        /// </summary>
+        /// <param name="providerName">The provider name.</param>
+        /// <param name="providerUserId">The provider user id.</param>
+        /// <response code="400">Invalid provider name.</response>
+        /// <response code="500">An error while saving the user account.</response>
         [ApiExplorerSettings(IgnoreApi = true)]
         [HttpPost]
         [Route("unlink/{providerName:minlength(1)}")]
         [Authorize(Roles = AuthorizationRoles.User)]
+        [ResponseType(typeof(TokenResult))]
         public async Task<IHttpActionResult> RemoveExternalLoginAsync(string providerName, [NakedBody] string providerUserId) {
             if (String.IsNullOrWhiteSpace(providerName) || String.IsNullOrWhiteSpace(providerUserId)) {
-                _logger.Error().Message("Remove external login failed for \"{0}\": Invalid Provider Name or Provider User Id.", ExceptionlessUser.EmailAddress).Tag("External Login", providerName).Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).Property("Provider User Id", providerUserId).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Remove external login failed for \"{0}\": Invalid Provider Name or Provider User Id.", CurrentUser.EmailAddress).Tag("External Login", providerName).Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).Property("Provider User Id", providerUserId).SetActionContext(ActionContext).Write();
                 return BadRequest("Invalid Provider Name or Provider User Id.");
             }
 
-            if (ExceptionlessUser.OAuthAccounts.Count <= 1 && String.IsNullOrEmpty(ExceptionlessUser.Password)) {
-                _logger.Error().Message("Remove external login failed for \"{0}\": You must set a local password before removing your external login.", ExceptionlessUser.EmailAddress).Tag("External Login", providerName).Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).Property("Provider User Id", providerUserId).SetActionContext(ActionContext).Write();
+            if (CurrentUser.OAuthAccounts.Count <= 1 && String.IsNullOrEmpty(CurrentUser.Password)) {
+                _logger.Error().Message("Remove external login failed for \"{0}\": You must set a local password before removing your external login.", CurrentUser.EmailAddress).Tag("External Login", providerName).Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).Property("Provider User Id", providerUserId).SetActionContext(ActionContext).Write();
                 return BadRequest("You must set a local password before removing your external login.");
             }
 
-            if (ExceptionlessUser.RemoveOAuthAccount(providerName, providerUserId))
-                await _userRepository.SaveAsync(ExceptionlessUser, true);
+            try {
+                if (CurrentUser.RemoveOAuthAccount(providerName, providerUserId))
+                    await _userRepository.SaveAsync(CurrentUser, o => o.Cache());
+            } catch (Exception ex) {
+                _logger.Error().Exception(ex).Critical().Message("Error removing external login for \"{0}\": {1}", CurrentUser.EmailAddress, ex.Message).Tag("RemoveExternalLoginAsync").Identity(CurrentUser.EmailAddress).SetActionContext(ActionContext).Write();
+                throw;
+            }
 
-            _logger.Info().Message("\"{0}\" removed an external login: \"{1}\"", ExceptionlessUser.EmailAddress, providerName).Tag("External Login", providerName).Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).SetActionContext(ActionContext).Write();
-            return Ok();
+            await ResetUserTokensAsync(CurrentUser, nameof(RemoveExternalLoginAsync));
+
+            _logger.Info().Message("\"{0}\" removed an external login: \"{1}\"", CurrentUser.EmailAddress, providerName).Tag("External Login", providerName).Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).SetActionContext(ActionContext).Write();
+            return Ok(new TokenResult { Token = await GetTokenAsync(CurrentUser) });
         }
 
         /// <summary>
@@ -298,30 +338,32 @@ namespace Exceptionless.Api.Controllers {
         [HttpPost]
         [Route("change-password")]
         [Authorize(Roles = AuthorizationRoles.User)]
+        [ResponseType(typeof(TokenResult))]
         public async Task<IHttpActionResult> ChangePasswordAsync(ChangePasswordModel model) {
             if (model == null || !IsValidPassword(model.Password)) {
-                _logger.Error().Message("Change password failed for \"{0}\": The New Password must be at least 6 characters long.", ExceptionlessUser.EmailAddress).Tag("Change Password").Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).Property("Password Length", model?.Password?.Length ?? 0).SetActionContext(ActionContext).Write();
+                _logger.Error().Message("Change password failed for \"{0}\": The New Password must be at least 6 characters long.", CurrentUser.EmailAddress).Tag("Change Password").Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).Property("Password Length", model?.Password?.Length ?? 0).SetActionContext(ActionContext).Write();
                 return BadRequest("The New Password must be at least 6 characters long.");
             }
 
             // User has a local account..
-            if (!String.IsNullOrWhiteSpace(ExceptionlessUser.Password)) {
+            if (!String.IsNullOrWhiteSpace(CurrentUser.Password)) {
                 if (String.IsNullOrWhiteSpace(model.CurrentPassword)) {
-                    _logger.Error().Message("Change password failed for \"{0}\": The current password is incorrect.", ExceptionlessUser.EmailAddress).Tag("Change Password").Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).SetActionContext(ActionContext).Write();
+                    _logger.Error().Message("Change password failed for \"{0}\": The current password is incorrect.", CurrentUser.EmailAddress).Tag("Change Password").Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).SetActionContext(ActionContext).Write();
                     return BadRequest("The current password is incorrect.");
                 }
 
-                string encodedPassword = model.CurrentPassword.ToSaltedHash(ExceptionlessUser.Salt);
-                if (!String.Equals(encodedPassword, ExceptionlessUser.Password)) {
-                    _logger.Error().Message("Change password failed for \"{0}\": The current password is incorrect.", ExceptionlessUser.EmailAddress).Tag("Change Password").Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).SetActionContext(ActionContext).Write();
+                string encodedPassword = model.CurrentPassword.ToSaltedHash(CurrentUser.Salt);
+                if (!String.Equals(encodedPassword, CurrentUser.Password)) {
+                    _logger.Error().Message("Change password failed for \"{0}\": The current password is incorrect.", CurrentUser.EmailAddress).Tag("Change Password").Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).SetActionContext(ActionContext).Write();
                     return BadRequest("The current password is incorrect.");
                 }
             }
 
-            await ChangePasswordAsync(ExceptionlessUser, model.Password);
+            await ChangePasswordAsync(CurrentUser, model.Password, nameof(ChangePasswordAsync));
+            await ResetUserTokensAsync(CurrentUser, nameof(ChangePasswordAsync));
 
-            _logger.Info().Message("\"{0}\" changed their password.", ExceptionlessUser.EmailAddress).Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).SetActionContext(ActionContext).Write();
-            return Ok();
+            _logger.Info().Message("\"{0}\" changed their password.", CurrentUser.EmailAddress).Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).SetActionContext(ActionContext).Write();
+            return Ok(new TokenResult { Token = await GetTokenAsync(CurrentUser) });
         }
 
         [ApiExplorerSettings(IgnoreApi = true)]
@@ -331,9 +373,10 @@ namespace Exceptionless.Api.Controllers {
             if (String.IsNullOrWhiteSpace(email))
                 return StatusCode(HttpStatusCode.NoContent);
 
-            if (ExceptionlessUser != null && String.Equals(ExceptionlessUser.EmailAddress, email, StringComparison.OrdinalIgnoreCase))
+            email = email.Trim().ToLowerInvariant();
+            if (CurrentUser != null && String.Equals(CurrentUser.EmailAddress, email, StringComparison.InvariantCultureIgnoreCase))
                 return StatusCode(HttpStatusCode.Created);
-            
+
             // Only allow 3 checks attempts per hour period by a single ip.
             string ipEmailAddressAttemptsCacheKey = $"ip:{Request.GetClientIpAddress()}:email:attempts";
             long attempts = await _cache.IncrementAsync(ipEmailAddressAttemptsCacheKey, 1, SystemClock.UtcNow.Ceiling(TimeSpan.FromHours(1)));
@@ -357,6 +400,7 @@ namespace Exceptionless.Api.Controllers {
                 return BadRequest("Please specify a valid Email Address.");
             }
 
+            email = email.Trim().ToLowerInvariant();
             var user = await _userRepository.GetByEmailAddressAsync(email);
             if (user == null) {
                 _logger.Error().Message("Forgot password failed for \"{0}\": No user was found.", email).Tag("Forgot Password").Identity(email).Property("Email Address", email).SetActionContext(ActionContext).Write();
@@ -364,10 +408,9 @@ namespace Exceptionless.Api.Controllers {
             }
 
             user.CreatePasswordResetToken();
-            await _userRepository.SaveAsync(user, true);
+            await _userRepository.SaveAsync(user, o => o.Cache());
 
-            await _mailer.SendPasswordResetAsync(user);
-
+            await _mailer.SendUserPasswordResetAsync(user);
             _logger.Info().Message("\"{0}\" forgot their password.", user.EmailAddress).Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
             return Ok();
         }
@@ -402,7 +445,8 @@ namespace Exceptionless.Api.Controllers {
             }
 
             user.MarkEmailAddressVerified();
-            await ChangePasswordAsync(user, model.Password);
+            await ChangePasswordAsync(user, model.Password, nameof(ResetPasswordAsync));
+            await ResetUserTokensAsync(user, nameof(ResetPasswordAsync));
 
             _logger.Info().Message("\"{0}\" reset their password.", user.EmailAddress).Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
             return Ok();
@@ -426,7 +470,7 @@ namespace Exceptionless.Api.Controllers {
                 return Ok();
 
             user.ResetPasswordResetToken();
-            await _userRepository.SaveAsync(user, true);
+            await _userRepository.SaveAsync(user, o => o.Cache());
 
             _logger.Info().Message("\"{0}\" canceled the reset password", user.EmailAddress).Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
             return Ok();
@@ -490,41 +534,43 @@ namespace Exceptionless.Api.Controllers {
         }
 
         private async Task<User> FromExternalLoginAsync(UserInfo userInfo) {
-            User existingUser = await _userRepository.GetUserByOAuthProviderAsync(userInfo.ProviderName, userInfo.Id);
+            var existingUser = await _userRepository.GetUserByOAuthProviderAsync(userInfo.ProviderName, userInfo.Id);
 
             // Link user accounts.
-            if (ExceptionlessUser != null) {
+            if (CurrentUser != null) {
                 if (existingUser != null) {
-                    if (existingUser.Id != ExceptionlessUser.Id) {
+                    if (existingUser.Id != CurrentUser.Id) {
                         // Existing user account is not the current user. Remove it and we'll add it to the current user below.
-                        if (!existingUser.RemoveOAuthAccount(userInfo.ProviderName, userInfo.Id))
+                        if (!existingUser.RemoveOAuthAccount(userInfo.ProviderName, userInfo.Id)) {
+                            _logger.Error().Message("Unable to remove existing oauth account for existing user \"{0}\"", existingUser.EmailAddress).Tag("External Login").Identity(CurrentUser.EmailAddress).Property("User Info", userInfo).Property("User", CurrentUser).Property("ExistingUser", existingUser).SetActionContext(ActionContext).Write();
                             return null;
+                        }
 
-                        await _userRepository.SaveAsync(existingUser, true);
+                        await _userRepository.SaveAsync(existingUser, o => o.Cache());
                     } else {
                         // User is already logged in.
-                        return ExceptionlessUser;
+                        return CurrentUser;
                     }
                 }
 
                 // Add it to the current user if it doesn't already exist and save it.
-                ExceptionlessUser.AddOAuthAccount(userInfo.ProviderName, userInfo.Id, userInfo.Email);
-                await _userRepository.SaveAsync(ExceptionlessUser, true);
-                return ExceptionlessUser;
+                CurrentUser.AddOAuthAccount(userInfo.ProviderName, userInfo.Id, userInfo.Email);
+                await _userRepository.SaveAsync(CurrentUser, o => o.Cache());
+                return CurrentUser;
             }
 
             // Create a new user account or return an existing one.
             if (existingUser != null) {
                 if (!existingUser.IsEmailAddressVerified) {
                     existingUser.MarkEmailAddressVerified();
-                    await _userRepository.SaveAsync(existingUser, true);
+                    await _userRepository.SaveAsync(existingUser, o => o.Cache());
                 }
 
                 return existingUser;
             }
 
             // Check to see if a user already exists with this email address.
-            User user = !String.IsNullOrEmpty(userInfo.Email) ? await _userRepository.GetByEmailAddressAsync(userInfo.Email) : null;
+            var user = !String.IsNullOrEmpty(userInfo.Email) ? await _userRepository.GetByEmailAddressAsync(userInfo.Email) : null;
             if (user == null) {
                 if (!Settings.Current.EnableAccountCreation)
                     throw new ApplicationException("Account Creation is currently disabled.");
@@ -539,9 +585,9 @@ namespace Exceptionless.Api.Controllers {
             user.AddOAuthAccount(userInfo.ProviderName, userInfo.Id, userInfo.Email);
 
             if (String.IsNullOrEmpty(user.Id))
-                await _userRepository.AddAsync(user, true);
+                await _userRepository.AddAsync(user, o => o.Cache());
             else
-                await _userRepository.SaveAsync(user, true);
+                await _userRepository.SaveAsync(user, o => o.Cache());
 
             return user;
         }
@@ -552,7 +598,7 @@ namespace Exceptionless.Api.Controllers {
 
             if (String.IsNullOrEmpty(token))
                 return false;
-            
+
             var organization = await _organizationRepository.GetByInviteTokenAsync(token);
             return organization != null;
         }
@@ -571,26 +617,42 @@ namespace Exceptionless.Api.Controllers {
             if (!user.IsEmailAddressVerified && String.Equals(user.EmailAddress, invite.EmailAddress, StringComparison.OrdinalIgnoreCase)) {
                 _logger.Info().Message("Marking the invited users email address \"{0}\" as verified.", user.EmailAddress).Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
                 user.MarkEmailAddressVerified();
-                await _userRepository.SaveAsync(user, true);
+                await _userRepository.SaveAsync(user, o => o.Cache());
             }
 
             if (!user.OrganizationIds.Contains(organization.Id)) {
                 _logger.Info().Message("\"{0}\" joined from invite.", user.EmailAddress).Tag("Invite").Property("Organization", organization).Identity(user.EmailAddress).Property("User", user).SetActionContext(ActionContext).Write();
                 user.OrganizationIds.Add(organization.Id);
-                await _userRepository.SaveAsync(user, true);
+                await _userRepository.SaveAsync(user, o => o.Cache());
             }
 
             organization.Invites.Remove(invite);
-            await _organizationRepository.SaveAsync(organization, true);
+            await _organizationRepository.SaveAsync(organization, o => o.Cache());
         }
 
-        private Task ChangePasswordAsync(User user, string password) {
+        private async Task ChangePasswordAsync(User user, string password, string tag) {
             if (String.IsNullOrEmpty(user.Salt))
                 user.Salt = Core.Extensions.StringExtensions.GetNewToken();
 
             user.Password = password.ToSaltedHash(user.Salt);
             user.ResetPasswordResetToken();
-            return _userRepository.SaveAsync(user, true);
+
+            try {
+                await _userRepository.SaveAsync(user, o => o.Cache());
+                _logger.Info().Message("Changed password for \"{0}\"", user.EmailAddress).Tag(tag).Identity(user.EmailAddress).SetActionContext(ActionContext).Write();
+            } catch (Exception ex) {
+                _logger.Error().Exception(ex).Critical().Message("Error changing password for \"{0}\": {1}", user.EmailAddress, ex.Message).Tag(tag).Identity(user.EmailAddress).SetActionContext(ActionContext).Write();
+                throw;
+            }
+        }
+
+        private async Task ResetUserTokensAsync(User user, string tag) {
+            try {
+                long total = await _tokenRepository.RemoveAllByUserIdAsync(user.Id, o => o.ImmediateConsistency(true));
+                _logger.Info().Message("Removed user {0} tokens for \"{1}\"", total, user.EmailAddress).Tag(tag).Identity(user.EmailAddress).SetActionContext(ActionContext).Write();
+            } catch (Exception ex) {
+                _logger.Error().Exception(ex).Critical().Message("Error removing user tokens for \"{0}\": {1}", user.EmailAddress, ex.Message).Tag(tag).Identity(user.EmailAddress).SetActionContext(ActionContext).Write();
+            }
         }
 
         private async Task<string> GetTokenAsync(User user) {
@@ -603,18 +665,19 @@ namespace Exceptionless.Api.Controllers {
                 Id = Core.Extensions.StringExtensions.GetNewToken(),
                 UserId = user.Id,
                 CreatedUtc = SystemClock.UtcNow,
-                ModifiedUtc = SystemClock.UtcNow,
+                UpdatedUtc = SystemClock.UtcNow,
+                ExpiresUtc = SystemClock.UtcNow.AddMonths(3),
                 CreatedBy = user.Id,
                 Type = TokenType.Access
-            });
+            }, o => o.Cache());
 
             return token.Id;
         }
 
-	    private bool IsValidActiveDirectoryLogin(string email, string password) {
-			string domainUsername = _domainLoginProvider.GetUsernameFromEmailAddress(email);
-		    return domainUsername != null && _domainLoginProvider.Login(domainUsername, password);
-	    }
+        private bool IsValidActiveDirectoryLogin(string email, string password) {
+            string domainUsername = _domainLoginProvider.GetUsernameFromEmailAddress(email);
+            return domainUsername != null && _domainLoginProvider.Login(domainUsername, password);
+        }
 
         private static bool IsValidPassword(string password) {
             if (String.IsNullOrWhiteSpace(password))

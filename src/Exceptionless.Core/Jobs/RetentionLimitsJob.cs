@@ -10,10 +10,11 @@ using Foundatio.Caching;
 using Foundatio.Jobs;
 using Foundatio.Lock;
 using Foundatio.Logging;
-using Foundatio.Repositories.Elasticsearch.Models;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 
 namespace Exceptionless.Core.Jobs {
+    [Job(Description = "Deletes old events that are outside of a plans retention period.", InitialDelay = "15m", Interval = "1h")]
     public class RetentionLimitsJob : JobWithLockBase {
         private readonly IOrganizationRepository _organizationRepository;
         private readonly IEventRepository _eventRepository;
@@ -30,7 +31,7 @@ namespace Exceptionless.Core.Jobs {
         }
 
         protected override async Task<JobResult> RunInternalAsync(JobContext context) {
-            var results = await _organizationRepository.GetByRetentionDaysEnabledAsync(new ElasticPagingOptions().UseSnapshotPaging().WithLimit(100)).AnyContext();
+            var results = await _organizationRepository.GetByRetentionDaysEnabledAsync(o => o.SnapshotPaging().PageLimit(100)).AnyContext();
             while (results.Documents.Count > 0 && !context.CancellationToken.IsCancellationRequested) {
                 foreach (var organization in results.Documents) {
                     await EnforceEventCountLimitsAsync(organization).AnyContext();
@@ -62,7 +63,7 @@ namespace Exceptionless.Core.Jobs {
                 if (Settings.Current.MaximumRetentionDays > 0 && retentionDays > Settings.Current.MaximumRetentionDays)
                     retentionDays = Settings.Current.MaximumRetentionDays;
 
-                DateTime cutoff = SystemClock.UtcNow.Date.SubtractDays(retentionDays);
+                var cutoff = SystemClock.UtcNow.Date.SubtractDays(retentionDays);
                 await _eventRepository.RemoveAllByDateAsync(organization.Id, cutoff).AnyContext();
             } catch (Exception ex) {
                 _logger.Error(ex, "Error enforcing limits: org={0} id={1} message=\"{2}\"", organization.Name, organization.Id, ex.Message);

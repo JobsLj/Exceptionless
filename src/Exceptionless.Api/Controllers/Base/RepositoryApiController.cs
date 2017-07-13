@@ -9,6 +9,7 @@ using Exceptionless.Api.Extensions;
 using Exceptionless.Api.Utility;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Models;
+using Exceptionless.Core.Queries.Validation;
 using FluentValidation;
 using Foundatio.Logging;
 using Foundatio.Repositories;
@@ -17,19 +18,14 @@ using Foundatio.Repositories.Models;
 #pragma warning disable 1998
 
 namespace Exceptionless.Api.Controllers {
-    public abstract class RepositoryApiController<TRepository, TModel, TViewModel, TNewModel, TUpdateModel> : ReadOnlyRepositoryApiController<TRepository, TModel, TViewModel> where TRepository : IRepository<TModel> where TModel : class, IIdentity, new() where TViewModel : class, IIdentity, new() where TNewModel : class, new() where TUpdateModel : class, new() {
-        protected readonly ILogger _logger;
-
-        public RepositoryApiController(TRepository repository, ILoggerFactory loggerFactory, IMapper mapper) : base(repository, mapper) {
-            _logger = loggerFactory.CreateLogger(GetType());
-        }
+    public abstract class RepositoryApiController<TRepository, TModel, TViewModel, TNewModel, TUpdateModel> : ReadOnlyRepositoryApiController<TRepository, TModel, TViewModel> where TRepository : ISearchableRepository<TModel> where TModel : class, IIdentity, new() where TViewModel : class, IIdentity, new() where TNewModel : class, new() where TUpdateModel : class, new() {
+        public RepositoryApiController(TRepository repository, IMapper mapper, IQueryValidator validator, ILoggerFactory loggerFactory) : base(repository, mapper, validator, loggerFactory) {}
 
         public virtual async Task<IHttpActionResult> PostAsync(TNewModel value) {
             if (value == null)
                 return BadRequest();
 
-            TModel mapped = await MapAsync<TModel>(value);
-
+            var mapped = await MapAsync<TModel>(value);
             var orgModel = mapped as IOwnedByOrganization;
             // if no organization id is specified, default to the user's 1st associated org.
             if (!_isOrganization && orgModel != null && String.IsNullOrEmpty(orgModel.OrganizationId) && GetAssociatedOrganizationIds().Any())
@@ -51,14 +47,14 @@ namespace Exceptionless.Api.Controllers {
         }
 
         protected async Task<IHttpActionResult> UpdateModelAsync(string id, Func<TModel, Task<TModel>> modelUpdateFunc) {
-            TModel model = await GetModelAsync(id);
+            var model = await GetModelAsync(id);
             if (model == null)
                 return NotFound();
 
             if (modelUpdateFunc != null)
                 model = await modelUpdateFunc(model);
 
-            await _repository.SaveAsync(model, true);
+            await _repository.SaveAsync(model, o => o.Cache());
             await AfterUpdateAsync(model);
 
             if (typeof(TViewModel) == typeof(TModel))
@@ -76,7 +72,7 @@ namespace Exceptionless.Api.Controllers {
                 foreach (var model in models)
                     await modelUpdateFunc(model);
 
-            await _repository.SaveAsync(models, true);
+            await _repository.SaveAsync(models, o => o.Cache());
             foreach (var model in models)
                 await AfterUpdateAsync(model);
 
@@ -122,7 +118,7 @@ namespace Exceptionless.Api.Controllers {
         }
 
         protected virtual Task<TModel> AddModelAsync(TModel value) {
-            return _repository.AddAsync(value, true);
+            return _repository.AddAsync(value, o => o.Cache());
         }
 
         protected virtual Task<TModel> AfterAddAsync(TModel value) {
@@ -134,7 +130,7 @@ namespace Exceptionless.Api.Controllers {
         }
 
         public virtual async Task<IHttpActionResult> PatchAsync(string id, Delta<TUpdateModel> changes) {
-            TModel original = await GetModelAsync(id, false);
+            var original = await GetModelAsync(id, false);
             if (original == null)
                 return NotFound();
 
@@ -157,8 +153,7 @@ namespace Exceptionless.Api.Controllers {
         }
 
         protected virtual async Task<PermissionResult> CanUpdateAsync(TModel original, Delta<TUpdateModel> changes) {
-            var orgModel = original as IOwnedByOrganization;
-            if (orgModel != null && !CanAccessOrganization(orgModel.OrganizationId))
+            if (original is IOwnedByOrganization orgModel && !CanAccessOrganization(orgModel.OrganizationId))
                 return PermissionResult.DenyWithMessage("Invalid organization id specified.");
 
             if (changes.GetChangedPropertyNames().Contains("OrganizationId"))
@@ -169,7 +164,7 @@ namespace Exceptionless.Api.Controllers {
 
         protected virtual Task<TModel> UpdateModelAsync(TModel original, Delta<TUpdateModel> changes) {
             changes.Patch(original);
-            return _repository.SaveAsync(original, true);
+            return _repository.SaveAsync(original, o => o.Cache());
         }
 
         protected virtual Task<TModel> AfterPatchAsync(TModel value) {
@@ -201,7 +196,7 @@ namespace Exceptionless.Api.Controllers {
             try {
                 workIds = await DeleteModelsAsync(list) ?? new List<string>();
             } catch (Exception ex) {
-                _logger.Error().Exception(ex).Identity(ExceptionlessUser.EmailAddress).Property("User", ExceptionlessUser).SetActionContext(ActionContext).Write();
+                _logger.Error().Exception(ex).Identity(CurrentUser.EmailAddress).Property("User", CurrentUser).SetActionContext(ActionContext).Write();
                 return StatusCode(HttpStatusCode.InternalServerError);
             }
 
@@ -214,15 +209,20 @@ namespace Exceptionless.Api.Controllers {
         }
 
         protected virtual async Task<PermissionResult> CanDeleteAsync(TModel value) {
-            var orgModel = value as IOwnedByOrganization;
-            if (orgModel != null && !CanAccessOrganization(orgModel.OrganizationId))
+            if (value is IOwnedByOrganization orgModel && !CanAccessOrganization(orgModel.OrganizationId))
                 return PermissionResult.DenyWithNotFound(value.Id);
 
             return PermissionResult.Allow;
         }
 
         protected virtual async Task<IEnumerable<string>> DeleteModelsAsync(ICollection<TModel> values) {
-            await _repository.RemoveAsync(values);
+            if (_supportsSoftDeletes) {
+                values.Cast<ISupportSoftDeletes>().ForEach(v => v.IsDeleted = true);
+                await _repository.SaveAsync(values);
+            } else {
+                await _repository.RemoveAsync(values);
+            }
+
             return new List<string>();
         }
     }

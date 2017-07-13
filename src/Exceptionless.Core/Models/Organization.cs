@@ -156,20 +156,9 @@ namespace Exceptionless.Core.Models {
         public DataDictionary Data { get; set; }
 
         public DateTime CreatedUtc { get; set; }
-
-        public DateTime ModifiedUtc { get; set; }
-
-        DateTime IHaveDates.UpdatedUtc { get { return ModifiedUtc; } set { ModifiedUtc = value; } }
+        public DateTime UpdatedUtc { get; set; }
 
         string IOwnedByOrganization.OrganizationId { get { return Id; } set { Id = value; } }
-    }
-
-    public class UsageInfo {
-        public DateTime Date { get; set; }
-        public int Total { get; set; }
-        public int Blocked { get; set; }
-        public int Limit { get; set; }
-        public int TooBig { get; set; }
     }
 
     public enum BillingStatus {

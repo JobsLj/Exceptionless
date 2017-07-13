@@ -1,12 +1,15 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Exceptionless.Core.Models;
 using FluentValidation;
 using FluentValidation.Results;
 
 namespace Exceptionless.Core.Validation {
     public class StackValidator : AbstractValidator<Stack> {
-        public override ValidationResult Validate(Stack stack) {
+        public override ValidationResult Validate(ValidationContext<Stack> context) {
             var result = new ValidationResult();
+            var stack = context.InstanceToValidate;
 
             if (!IsObjectId(stack.Id))
                 result.Errors.Add(new ValidationFailure("Id", "Please specify a valid id."));
@@ -23,7 +26,7 @@ namespace Exceptionless.Core.Validation {
             if (stack.Type != null && (stack.Type.Length < 1 || stack.Type.Length > 100))
                 result.Errors.Add(new ValidationFailure("Type", "Type must be specified and cannot be longer than 100 characters."));
 
-            foreach (var tag in stack.Tags) {
+            foreach (string tag in stack.Tags) {
                 if (String.IsNullOrEmpty(tag))
                     result.Errors.Add(new ValidationFailure("Tags", "Tags can't be empty."));
                 else if (tag.Length > 255)
@@ -37,6 +40,10 @@ namespace Exceptionless.Core.Validation {
                 result.Errors.Add(new ValidationFailure("SignatureInfo", "Please specify a valid signature info."));
 
             return result;
+        }
+
+        public override Task<ValidationResult> ValidateAsync(ValidationContext<Stack> context, CancellationToken cancellation = new CancellationToken()) {
+            return Task.FromResult(Validate(context.InstanceToValidate));
         }
 
         private bool IsObjectId(string value) {

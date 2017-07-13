@@ -5,12 +5,8 @@ using Exceptionless.Core.Extensions;
 using Foundatio.Logging;
 
 namespace Exceptionless.Core.Plugins.EventProcessor {
-    public abstract class EventProcessorPluginBase : IEventProcessorPlugin {
-        protected readonly ILogger _logger;
-
-        public EventProcessorPluginBase(ILoggerFactory loggerFactory = null) {
-            _logger = loggerFactory.CreateLogger(GetType());
-        }
+    public abstract class EventProcessorPluginBase : PluginBase, IEventProcessorPlugin {
+        public EventProcessorPluginBase(ILoggerFactory loggerFactory = null) : base(loggerFactory) { }
 
         protected bool ContinueOnError { get; set; }
 
@@ -57,7 +53,7 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
         public virtual Task EventProcessedAsync(EventContext context) {
             return Task.CompletedTask;
         }
-        
+
         public virtual bool HandleError(Exception exception, EventContext context) {
             return ContinueOnError;
         }

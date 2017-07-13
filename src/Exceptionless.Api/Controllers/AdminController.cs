@@ -2,6 +2,7 @@
 using System.Threading.Tasks;
 using System.Web.Http;
 using System.Web.Http.Description;
+using Exceptionless.Core;
 using Exceptionless.Core.Authorization;
 using Exceptionless.Core.Billing;
 using Exceptionless.Core.Extensions;
@@ -53,7 +54,7 @@ namespace Exceptionless.Api.Controllers {
 
             organization.BillingStatus = !String.Equals(plan.Id, BillingManager.FreePlan.Id) ? BillingStatus.Active : BillingStatus.Trialing;
             organization.RemoveSuspension();
-            BillingManager.ApplyBillingPlan(organization, plan, ExceptionlessUser, false);
+            BillingManager.ApplyBillingPlan(organization, plan, CurrentUser, false);
 
             await _organizationRepository.SaveAsync(organization);
             await _messagePublisher.PublishAsync(new PlanChanged {
@@ -86,18 +87,22 @@ namespace Exceptionless.Api.Controllers {
             if (String.IsNullOrEmpty(path))
                 path = @"q\*";
 
-            foreach (var file in await _fileStorage.GetFileListAsync(path))
+            int enqueued = 0;
+            foreach (var file in await _fileStorage.GetFileListAsync(path)) {
                 await _eventPostQueue.EnqueueAsync(new EventPost { FilePath = file.Path, ShouldArchive = archive });
+                enqueued++;
+            }
 
-            return Ok();
+            return Ok(new { Enqueued = enqueued });
         }
-        
+
         [HttpGet]
         [Route("maintenance/{name:minlength(1)}")]
         public async Task<IHttpActionResult> RunJobAsync(string name) {
-            switch (name.ToLower()) {
+            switch (name.ToLowerInvariant()) {
                 case "indexes":
-                    await _configuration.ConfigureIndexesAsync(beginReindexingOutdated: false);
+                    if (!Settings.Current.DisableIndexConfiguration)
+                        await _configuration.ConfigureIndexesAsync(beginReindexingOutdated: false);
                     break;
                 case "update-organization-plans":
                     await _workItemQueue.EnqueueAsync(new OrganizationMaintenanceWorkItem { UpgradePlans = true });
@@ -108,10 +113,13 @@ namespace Exceptionless.Api.Controllers {
                 case "increment-project-configuration-version":
                     await _workItemQueue.EnqueueAsync(new ProjectMaintenanceWorkItem { IncrementConfigurationVersion = true });
                     break;
+                case "normalize-user-email-address":
+                    await _workItemQueue.EnqueueAsync(new UserMaintenanceWorkItem { Normalize = true });
+                    break;
                 default:
                     return NotFound();
             }
-            
+
             return Ok();
         }
     }

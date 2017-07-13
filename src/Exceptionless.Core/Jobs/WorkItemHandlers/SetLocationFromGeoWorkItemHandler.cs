@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Exceptionless.Core.AppStats;
@@ -31,17 +31,16 @@ namespace Exceptionless.Core.Jobs.WorkItemHandlers {
         }
 
         public override Task<ILock> GetWorkItemLockAsync(object workItem, CancellationToken cancellationToken = new CancellationToken()) {
-            var cacheKey = $"{nameof(SetLocationFromGeoWorkItemHandler)}:{((SetLocationFromGeoWorkItem)workItem).EventId}";
+            string cacheKey = $"{nameof(SetLocationFromGeoWorkItemHandler)}:{((SetLocationFromGeoWorkItem)workItem).EventId}";
             return _lockProvider.AcquireAsync(cacheKey, TimeSpan.FromMinutes(15), new CancellationToken(true));
         }
 
         public override async Task HandleItemAsync(WorkItemContext context) {
             var workItem = context.GetData<SetLocationFromGeoWorkItem>();
 
-            GeoResult result;
-            if (!GeoResult.TryParse(workItem.Geo, out result))
+            if (!GeoResult.TryParse(workItem.Geo, out GeoResult result))
                 return;
-            
+
             var location = await _cache.GetAsync<Location>(workItem.Geo, null).AnyContext();
             if (location == null) {
                 try {

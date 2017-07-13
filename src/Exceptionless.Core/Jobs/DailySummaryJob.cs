@@ -5,38 +5,38 @@ using System.Threading;
 using System.Threading.Tasks;
 using Exceptionless.Core.Billing;
 using Exceptionless.Core.Extensions;
-using Exceptionless.Core.Filter;
 using Exceptionless.Core.Mail;
-using Exceptionless.Core.Mail.Models;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Queues.Models;
 using Exceptionless.Core.Repositories;
 using Exceptionless.Core.Repositories.Configuration;
 using Exceptionless.Core.Repositories.Queries;
-using Exceptionless.Core.Utility;
 using Exceptionless.DateTimeExtensions;
 using Foundatio.Caching;
 using Foundatio.Jobs;
 using Foundatio.Lock;
 using Foundatio.Logging;
+using Foundatio.Repositories;
+using Foundatio.Repositories.Models;
 using Foundatio.Utility;
 
 namespace Exceptionless.Core.Jobs {
+    [Job(Description = "Sends daily summary emails.", InitialDelay = "1m", Interval = "1h")]
     public class DailySummaryJob : JobWithLockBase {
         private readonly IProjectRepository _projectRepository;
         private readonly IOrganizationRepository _organizationRepository;
         private readonly IUserRepository _userRepository;
+        private readonly IStackRepository _stackRepository;
         private readonly IEventRepository _eventRepository;
-        private readonly EventStats _stats;
         private readonly IMailer _mailer;
         private readonly ILockProvider _lockProvider;
 
-        public DailySummaryJob(IProjectRepository projectRepository, IOrganizationRepository organizationRepository, IUserRepository userRepository, IEventRepository eventRepository, EventStats stats, IMailer mailer, ICacheClient cacheClient, ILoggerFactory loggerFactory = null) : base(loggerFactory) {
+        public DailySummaryJob(IProjectRepository projectRepository, IOrganizationRepository organizationRepository, IUserRepository userRepository, IStackRepository stackRepository, IEventRepository eventRepository, IMailer mailer, ICacheClient cacheClient, ILoggerFactory loggerFactory = null) : base(loggerFactory) {
             _projectRepository = projectRepository;
             _organizationRepository = organizationRepository;
             _userRepository = userRepository;
+            _stackRepository = stackRepository;
             _eventRepository = eventRepository;
-            _stats = stats;
             _mailer = mailer;
             _lockProvider = new ThrottlingLockProvider(cacheClient, 1, TimeSpan.FromHours(1));
         }
@@ -51,7 +51,7 @@ namespace Exceptionless.Core.Jobs {
 
             var results = await _projectRepository.GetByNextSummaryNotificationOffsetAsync(9).AnyContext();
             while (results.Documents.Count > 0 && !context.CancellationToken.IsCancellationRequested) {
-                _logger.Info("Got {0} projects to process. ", results.Documents.Count);
+                _logger.Trace("Got {0} projects to process. ", results.Documents.Count);
 
                 var projectsToBulkUpdate = new List<Project>(results.Documents.Count);
                 var processSummariesNewerThan = SystemClock.UtcNow.Date.SubtractDays(2);
@@ -69,7 +69,7 @@ namespace Exceptionless.Core.Jobs {
                         UtcEndTime = new DateTime(project.NextSummaryEndOfDayTicks - TimeSpan.TicksPerSecond)
                     };
 
-                    var summarySent = await SendSummaryNotificationAsync(project, notification).AnyContext();
+                    bool summarySent = await SendSummaryNotificationAsync(project, notification).AnyContext();
                     if (summarySent) {
                         await _projectRepository.IncrementNextSummaryEndOfDayTicksAsync(new[] { project }).AnyContext();
 
@@ -98,13 +98,14 @@ namespace Exceptionless.Core.Jobs {
         }
 
         private async Task<bool> SendSummaryNotificationAsync(Project project, SummaryNotification data) {
-            var userIds = project.NotificationSettings.Where(n => n.Value.SendDailySummary).Select(n => n.Key).ToList();
+            // TODO: Add slack daily summaries
+            var userIds = project.NotificationSettings.Where(n => n.Value.SendDailySummary && !String.Equals(n.Key, Project.NotificationIntegrations.Slack)).Select(n => n.Key).ToList();
             if (userIds.Count == 0) {
                 _logger.Info().Project(project.Id).Message("Project \"{0}\" has no users to send summary to.", project.Name).Write();
                 return false;
             }
 
-            var results = await _userRepository.GetByIdsAsync(userIds, true).AnyContext();
+            var results = await _userRepository.GetByIdsAsync(userIds, o => o.Cache()).AnyContext();
             var users = results.Where(u => u.IsEmailAddressVerified && u.EmailNotificationsEnabled && u.OrganizationIds.Contains(project.OrganizationId)).ToList();
             if (users.Count == 0) {
                 _logger.Info().Project(project.Id).Message("Project \"{0}\" has no users to send summary to.", project.Name);
@@ -112,41 +113,48 @@ namespace Exceptionless.Core.Jobs {
             }
 
             // TODO: What should we do about suspended organizations.
-            var organization = await _organizationRepository.GetByIdAsync(project.OrganizationId, true).AnyContext();
+            var organization = await _organizationRepository.GetByIdAsync(project.OrganizationId, o => o.Cache()).AnyContext();
             if (organization == null) {
                 _logger.Info().Project(project.Id).Message("The organization \"{0}\" for project \"{1}\" may have been deleted. No summaries will be sent.", project.OrganizationId, project.Name);
                 return false;
             }
 
             _logger.Info("Sending daily summary: users={0} project={1}", users.Count, project.Id);
-            var fields = new List<FieldAggregation> {
-                new FieldAggregation { Type = FieldAggregationType.Distinct, Field = "stack_id" },
-                new TermFieldAggregation { Field = "is_first_occurrence", ExcludePattern = "F" }
-            };
+            var sf = new ExceptionlessSystemFilter(project, organization);
+            var systemFilter = new RepositoryQuery<PersistentEvent>().SystemFilter(sf).DateRange(data.UtcStartTime, data.UtcEndTime, (PersistentEvent e) => e.Date).Index(data.UtcStartTime, data.UtcEndTime);
+            string filter = $"{EventIndexType.Alias.Type}:{Event.KnownTypes.Error} {EventIndexType.Alias.IsHidden}:false {EventIndexType.Alias.IsFixed}:false";
+            var result = await _eventRepository.CountBySearchAsync(systemFilter, filter, "terms:(first @include:true) terms:(stack_id~3) cardinality:stack_id sum:count~1").AnyContext();
 
-            var sf = new ExceptionlessSystemFilterQuery(project, organization);
-            var result = await _stats.GetNumbersStatsAsync(fields, data.UtcStartTime, data.UtcEndTime, sf, $"{EventIndexType.Fields.Type}:{Event.KnownTypes.Error}").AnyContext();
-            bool hasSubmittedEvents = result.Total > 0;
-            if (!hasSubmittedEvents)
-                hasSubmittedEvents = await _eventRepository.GetCountByProjectIdAsync(project.Id).AnyContext() > 0;
+            double total = result.Aggregations.Sum("sum_count").Value ?? result.Total;
+            double newTotal = result.Aggregations.Terms<double>("terms_first")?.Buckets.FirstOrDefault()?.Total ?? 0;
+            double uniqueTotal = result.Aggregations.Cardinality("cardinality_stack_id")?.Value ?? 0;
+            bool hasSubmittedEvents = total > 0 || project.IsConfigured.GetValueOrDefault();
+            bool isFreePlan = organization.PlanId == BillingManager.FreePlan.Id;
 
-            var notification = new DailySummaryModel {
-                ProjectId = project.Id,
-                ProjectName = project.Name,
-                StartDate = data.UtcStartTime,
-                EndDate = data.UtcEndTime,
-                Total = result.Total,
-                PerHourAverage = result.Total / data.UtcEndTime.Subtract(data.UtcStartTime).TotalHours,
-                NewTotal = result.Numbers[1],
-                UniqueTotal = result.Numbers[0],
-                HasSubmittedEvents = hasSubmittedEvents,
-                IsFreePlan = organization.PlanId == BillingManager.FreePlan.Id
-            };
+            string fixedFilter = $"{EventIndexType.Alias.Type}:{Event.KnownTypes.Error} {EventIndexType.Alias.IsHidden}:false {EventIndexType.Alias.IsFixed}:true";
+            var fixedResult = await _eventRepository.CountBySearchAsync(systemFilter, fixedFilter, "sum:count~1").AnyContext();
+            double fixedTotal = fixedResult.Aggregations.Sum("sum_count").Value ?? fixedResult.Total;
 
-            foreach (var user in users)
-                await _mailer.SendDailySummaryAsync(user.EmailAddress, notification).AnyContext();
+            var range = new DateTimeRange(data.UtcStartTime, data.UtcEndTime);
+            var usages = project.OverageHours.Where(u => range.Contains(u.Date)).ToList();
+            int blockedTotal = usages.Sum(u => u.Blocked);
+            int tooBigTotal = usages.Sum(u => u.TooBig);
 
-            _logger.Info().Project(project.Id).Message("Done sending daily summary: users={0} project={1} events={2}", users.Count, project.Name, notification.Total);
+            IReadOnlyCollection<Stack> mostFrequent = null;
+            var stackTerms = result.Aggregations.Terms<string>("terms_stack_id");
+            if (stackTerms?.Buckets.Count > 0)
+                mostFrequent = await _stackRepository.GetByIdsAsync(stackTerms.Buckets.Select(b => b.Key).ToArray()).AnyContext();
+
+            IReadOnlyCollection<Stack> newest = null;
+            if (newTotal > 0)
+                newest = (await _stackRepository.GetByFilterAsync(sf, filter, "-first", "first", data.UtcStartTime, data.UtcEndTime, o => o.PageLimit(3)).AnyContext()).Documents;
+
+            foreach (var user in users) {
+                _logger.Info().Project(project.Id).Message("Queuing \"{0}\" daily summary email ({1}-{2}) for user {3}.", project.Name, data.UtcStartTime, data.UtcEndTime, user.EmailAddress);
+                await _mailer.SendProjectDailySummaryAsync(user, project, mostFrequent, newest, data.UtcStartTime, hasSubmittedEvents, total, uniqueTotal, newTotal, fixedTotal, blockedTotal, tooBigTotal, isFreePlan).AnyContext();
+            }
+
+            _logger.Info().Project(project.Id).Message("Done sending daily summary: users={0} project={1} events={2}", users.Count, project.Name, total);
             return true;
         }
     }

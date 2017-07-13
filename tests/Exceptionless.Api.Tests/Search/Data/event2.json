@@ -7,6 +7,8 @@
   "is_fixed": false,
   "is_hidden": true,
   "created_utc": "2014-12-09T17:28:44.966",
+  "updated_utc": "0001-01-01T00:00:00",
+  "is_deleted": false,
   "type": "error",
   "date": "2014-12-09T17:28:44.966+00:00",
   "tags": [
@@ -57,7 +59,7 @@
       "architecture": "x64",
       "o_s_name": "Microsoft Windows Server 2012 R2 Standard",
       "o_s_version": "6.3.9600.0",
-      "ip_address": "192.168.0.88",
+      "ip_address": "192.168.0.88, 2001:0:4137:9e76:cfd:33a0:5198:3a66",
       "machine_name": "SERVER-01",
       "runtime_version": "4.0.30319.34014",
       "data": {

@@ -1,49 +1,59 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
+using Exceptionless.Core.Messaging.Models;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Repositories.Configuration;
-using Exceptionless.Core.Repositories.Queries;
 using FluentValidation;
-using Foundatio.Repositories.Elasticsearch.Queries.Builders;
+using Foundatio.Repositories;
 using Foundatio.Repositories.Models;
-using Foundatio.Repositories.Queries;
 using Nest;
 using Token = Exceptionless.Core.Models.Token;
 
 namespace Exceptionless.Core.Repositories {
     public class TokenRepository : RepositoryOwnedByOrganizationAndProject<Token>, ITokenRepository {
-        public TokenRepository(ExceptionlessElasticConfiguration configuration, IValidator<Token> validator) 
+        public TokenRepository(ExceptionlessElasticConfiguration configuration, IValidator<Token> validator)
             : base(configuration.Organizations.Token, validator) {
         }
 
-        public Task<FindResults<Token>> GetByUserIdAsync(string userId) {
-            var filter = Filter<Token>.Term(e => e.UserId, userId);
-            return FindAsync(new ExceptionlessQuery().WithElasticFilter(filter));
+        public Task<FindResults<Token>> GetByUserIdAsync(string userId, CommandOptionsDescriptor<Token> options = null) {
+            var filter = Query<Token>.Term(e => e.UserId, userId);
+            return FindAsync(q => q.ElasticFilter(filter), options);
         }
 
-        public Task<FindResults<Token>> GetByTypeAndOrganizationIdAsync(TokenType type, string organizationId, PagingOptions paging = null) {
-            return FindAsync(new ExceptionlessQuery()
-                .WithOrganizationId(organizationId)
-                .WithElasticFilter(Filter<Token>.Term(t => t.Type, type))
-                .WithPaging(paging));
+        public Task<FindResults<Token>> GetByTypeAndOrganizationIdAsync(TokenType type, string organizationId, CommandOptionsDescriptor<Token> options = null) {
+            return FindAsync(q => q.Organization(organizationId).ElasticFilter(Query<Token>.Term(t => t.Type, type)), options);
         }
 
-        public Task<FindResults<Token>> GetByTypeAndProjectIdAsync(TokenType type, string projectId, PagingOptions paging = null) {
-            var filter = Filter<Token>.And(and => (
-                    Filter<Token>.Term(t => t.ProjectId, projectId) || Filter<Token>.Term(t => t.DefaultProjectId, projectId)
-                ) && Filter<Token>.Term(t => t.Type, type));
+        public Task<FindResults<Token>> GetByTypeAndProjectIdAsync(TokenType type, string projectId, CommandOptionsDescriptor<Token> options = null) {
+            var filter = (
+                    Query<Token>.Term(t => t.ProjectId, projectId) || Query<Token>.Term(t => t.DefaultProjectId, projectId)
+                ) && Query<Token>.Term(t => t.Type, type);
 
-            return FindAsync(new ExceptionlessQuery()
-                .WithElasticFilter(filter)
-                .WithPaging(paging));
+            return FindAsync(q => q.ElasticFilter(filter), options);
         }
 
-        public override Task<FindResults<Token>> GetByProjectIdAsync(string projectId, PagingOptions paging = null) {
-            var filter = Filter<Token>.And(and => (Filter<Token>.Term(t => t.ProjectId, projectId) || Filter<Token>.Term(t => t.DefaultProjectId, projectId)));
+        public override Task<FindResults<Token>> GetByProjectIdAsync(string projectId, CommandOptionsDescriptor<Token> options = null) {
+            var filter = (Query<Token>.Term(t => t.ProjectId, projectId) || Query<Token>.Term(t => t.DefaultProjectId, projectId));
+            return FindAsync(q => q.ElasticFilter(filter), options);
+        }
 
-            return FindAsync(new ExceptionlessQuery()
-                .WithElasticFilter(filter)
-                .WithPaging(paging));
+        public Task<long> RemoveAllByUserIdAsync(string userId, CommandOptionsDescriptor<Token> options = null) {
+            return RemoveAllAsync(q => q.ElasticFilter(Query<Token>.Term(t => t.UserId, userId)), options);
+        }
+
+        protected override Task PublishChangeTypeMessageAsync(ChangeType changeType, Token document, IDictionary<string, object> data = null, TimeSpan? delay = null) {
+            return PublishMessageAsync(new ExtendedEntityChanged {
+                ChangeType = changeType,
+                Id = document?.Id,
+                OrganizationId = document?.OrganizationId,
+                ProjectId = document?.ProjectId ?? document?.DefaultProjectId,
+                Type = EntityTypeName,
+                Data = new Foundatio.Utility.DataDictionary(data ?? new Dictionary<string, object>()) {
+                    { "IsAuthenticationToken", TokenType.Authentication == document?.Type  },
+                    { "UserId", document?.UserId }
+                }
+            }, delay);
         }
     }
 }

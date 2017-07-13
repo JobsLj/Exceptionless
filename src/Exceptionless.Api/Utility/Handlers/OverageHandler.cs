@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -6,18 +7,18 @@ using System.Threading.Tasks;
 using Exceptionless.Api.Extensions;
 using Exceptionless.Core;
 using Exceptionless.Core.AppStats;
-using Exceptionless.Core.Repositories;
+using Exceptionless.Core.Services;
 using Foundatio.Logging;
 using Foundatio.Metrics;
 
 namespace Exceptionless.Api.Utility {
     public sealed class OverageHandler : DelegatingHandler {
-        private readonly IOrganizationRepository _organizationRepository;
+        private readonly UsageService _usageService;
         private readonly IMetricsClient _metricsClient;
         private readonly ILogger _logger;
 
-        public OverageHandler(IOrganizationRepository organizationRepository, IMetricsClient metricsClient, ILogger<OverageHandler> logger) {
-            _organizationRepository = organizationRepository;
+        public OverageHandler(UsageService usageService, IMetricsClient metricsClient, ILogger<OverageHandler> logger) {
+            _usageService = usageService;
             _metricsClient = metricsClient;
             _logger = logger;
         }
@@ -49,13 +50,13 @@ namespace Exceptionless.Api.Utility {
                 long size = request.Content.Headers.ContentLength.GetValueOrDefault();
                 await _metricsClient.GaugeAsync(MetricNames.PostsSize, size);
                 if (size > Settings.Current.MaximumEventPostSize) {
-                    _logger.Warn().Message("Event submission discarded for being too large: {0}", size).Project(request.GetDefaultProjectId()).Write();
+                    _logger.Warn().Message("Event submission discarded for being too large: {0} bytes", size).Value(size).Tag(request.Content.Headers.ContentEncoding?.ToArray()).Project(request.GetDefaultProjectId()).Write();
                     await _metricsClient.CounterAsync(MetricNames.PostsDiscarded);
                     tooBig = true;
                 }
             }
 
-            bool overLimit = await _organizationRepository.IncrementUsageAsync(request.GetDefaultOrganizationId(), tooBig);
+            bool overLimit = await _usageService.IncrementUsageAsync(request.GetDefaultOrganizationId(), request.GetDefaultProjectId(), tooBig);
 
             // block large submissions, client should break them up or remove some of the data.
             if (tooBig)
@@ -70,7 +71,7 @@ namespace Exceptionless.Api.Utility {
         }
 
         private HttpResponseMessage CreateResponse(HttpRequestMessage request, HttpStatusCode statusCode, string message) {
-            HttpResponseMessage response = request.CreateResponse(statusCode);
+            var response = request.CreateResponse(statusCode);
             response.ReasonPhrase = message;
             response.Content = new StringContent(message);
 

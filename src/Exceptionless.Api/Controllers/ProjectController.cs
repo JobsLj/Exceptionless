@@ -12,15 +12,16 @@ using Exceptionless.Core.Authorization;
 using Exceptionless.Core.Billing;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Repositories;
-using Exceptionless.Core.Utility;
 using Exceptionless.Api.Utility;
-using Exceptionless.Core.Filter;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Models.WorkItems;
+using Exceptionless.Core.Queries.Validation;
 using Exceptionless.Core.Repositories.Queries;
+using Exceptionless.Core.Services;
 using Foundatio.Jobs;
 using Foundatio.Logging;
 using Foundatio.Queues;
+using Foundatio.Repositories;
 using Foundatio.Repositories.Models;
 using Foundatio.Utility;
 
@@ -29,15 +30,17 @@ namespace Exceptionless.Api.Controllers {
     [Authorize(Roles = AuthorizationRoles.User)]
     public class ProjectController : RepositoryApiController<IProjectRepository, Project, ViewProject, NewProject, UpdateProject> {
         private readonly IOrganizationRepository _organizationRepository;
+        private readonly IEventRepository _eventRepository;
         private readonly IQueue<WorkItemData> _workItemQueue;
         private readonly BillingManager _billingManager;
-        private readonly EventStats _stats;
+        private readonly SlackService _slackService;
 
-        public ProjectController(IProjectRepository projectRepository, IOrganizationRepository organizationRepository, IQueue<WorkItemData> workItemQueue, BillingManager billingManager, EventStats stats, ILoggerFactory loggerFactory, IMapper mapper) : base(projectRepository, loggerFactory, mapper) {
+        public ProjectController(IProjectRepository projectRepository, IOrganizationRepository organizationRepository, IEventRepository eventRepository, IQueue<WorkItemData> workItemQueue, BillingManager billingManager, SlackService slackService, IMapper mapper, QueryValidator validator, ILoggerFactory loggerFactory) : base(projectRepository, mapper, validator, loggerFactory) {
             _organizationRepository = organizationRepository;
+            _eventRepository = eventRepository;
             _workItemQueue = workItemQueue;
             _billingManager = billingManager;
-            _stats = stats;
+            _slackService = slackService;
         }
 
         #region CRUD
@@ -54,8 +57,7 @@ namespace Exceptionless.Api.Controllers {
         public async Task<IHttpActionResult> GetAsync(int page = 1, int limit = 10, string mode = null) {
             page = GetPage(page);
             limit = GetLimit(limit);
-            var options = new PagingOptions { Page = page, Limit = limit };
-            var projects = await _repository.GetByOrganizationIdsAsync(GetAssociatedOrganizationIds(), options);
+            var projects = await _repository.GetByOrganizationIdsAsync(GetAssociatedOrganizationIds(), o => o.PageNumber(page).PageLimit(limit));
             var viewProjects = await MapCollectionAsync<ViewProject>(projects.Documents, true);
 
             if (!String.IsNullOrEmpty(mode) && String.Equals(mode, "stats", StringComparison.OrdinalIgnoreCase))
@@ -81,8 +83,7 @@ namespace Exceptionless.Api.Controllers {
 
             page = GetPage(page);
             limit = GetLimit(limit);
-            var options = new PagingOptions { Page = page, Limit = limit };
-            var projects = await _repository.GetByOrganizationIdAsync(organization, options, true);
+            var projects = await _repository.GetByOrganizationIdAsync(organization, o => o.PageNumber(page).PageLimit(limit).Cache());
             var viewProjects = (await MapCollectionAsync<ViewProject>(projects.Documents, true)).ToList();
 
             if (!String.IsNullOrEmpty(mode) && String.Equals(mode, "stats", StringComparison.OrdinalIgnoreCase))
@@ -204,7 +205,7 @@ namespace Exceptionless.Api.Controllers {
 
             project.Configuration.Settings[key.Trim()] = value.Trim();
             project.Configuration.IncrementVersion();
-            await _repository.SaveAsync(project, true);
+            await _repository.SaveAsync(project, o => o.Cache());
 
             return Ok();
         }
@@ -214,6 +215,7 @@ namespace Exceptionless.Api.Controllers {
         /// </summary>
         /// <param name="id">The identifier of the project.</param>
         /// <param name="key">The key name of the configuration object.</param>
+        /// <response code="400">Invalid key value.</response>
         /// <response code="404">The project could not be found.</response>
         [HttpDelete]
         [Route("{id:objectid}/config")]
@@ -227,7 +229,7 @@ namespace Exceptionless.Api.Controllers {
 
             if (project.Configuration.Settings.Remove(key.Trim())) {
                 project.Configuration.IncrementVersion();
-                await _repository.SaveAsync(project, true);
+                await _repository.SaveAsync(project, o => o.Cache());
             }
 
             return Ok();
@@ -279,11 +281,32 @@ namespace Exceptionless.Api.Controllers {
             if (project == null)
                 return NotFound();
 
-            if (!Request.IsGlobalAdmin() && !String.Equals(ExceptionlessUser.Id, userId))
+            if (!Request.IsGlobalAdmin() && !String.Equals(CurrentUser.Id, userId))
                 return NotFound();
 
-            NotificationSettings settings;
-            return Ok(project.NotificationSettings.TryGetValue(userId, out settings) ? settings : new NotificationSettings());
+            return Ok(project.NotificationSettings.TryGetValue(userId, out NotificationSettings settings) ? settings : new NotificationSettings());
+        }
+
+
+        /// <summary>
+        /// Get an integrations notification settings
+        /// </summary>
+        /// <param name="id">The identifier of the project.</param>
+        /// <param name="integration">The identifier of the integration.</param>
+        /// <response code="404">The project or integration could not be found.</response>
+        [ApiExplorerSettings(IgnoreApi = true)]
+        [HttpGet]
+        [Route("{id:objectid}/{integration:minlength(1)}/notifications")]
+        [ResponseType(typeof(NotificationSettings))]
+        public async Task<IHttpActionResult> GetIntegrationNotificationSettingsAsync(string id, string integration) {
+            var project = await GetModelAsync(id);
+            if (project == null)
+                return NotFound();
+
+            if (!String.Equals(Project.NotificationIntegrations.Slack, integration))
+                return NotFound();
+
+            return Ok(project.NotificationSettings.TryGetValue(Project.NotificationIntegrations.Slack, out NotificationSettings settings) ? settings : new NotificationSettings());
         }
 
         /// <summary>
@@ -301,7 +324,7 @@ namespace Exceptionless.Api.Controllers {
             if (project == null)
                 return NotFound();
 
-            if (!Request.IsGlobalAdmin() && !String.Equals(ExceptionlessUser.Id, userId))
+            if (!Request.IsGlobalAdmin() && !String.Equals(CurrentUser.Id, userId))
                 return NotFound();
 
             if (settings == null)
@@ -309,7 +332,42 @@ namespace Exceptionless.Api.Controllers {
             else
                 project.NotificationSettings[userId] = settings;
 
-            await _repository.SaveAsync(project, true);
+            await _repository.SaveAsync(project, o => o.Cache());
+            return Ok();
+        }
+
+        /// <summary>
+        /// Set an integrations notification settings
+        /// </summary>
+        /// <param name="id">The identifier of the project.</param>
+        /// <param name="integration">The identifier of the user.</param>
+        /// <param name="settings">The notification settings.</param>
+        /// <response code="404">The project or integration could not be found.</response>
+        /// <response code="426">Please upgrade your plan to enable integrations.</response>
+        [HttpPut]
+        [HttpPost]
+        [Route("{id:objectid}/{integration:minlength(1)}/notifications")]
+        public async Task<IHttpActionResult> SetIntegrationNotificationSettingsAsync(string id, string integration, NotificationSettings settings) {
+            if (!String.Equals(Project.NotificationIntegrations.Slack, integration))
+                return NotFound();
+
+            var project = await GetModelAsync(id, false);
+            if (project == null)
+                return NotFound();
+
+            var organization = await _organizationRepository.GetByIdAsync(project.OrganizationId, o => o.Cache());
+            if (organization == null)
+                return NotFound();
+
+            if (!organization.HasPremiumFeatures)
+                return PlanLimitReached($"Please upgrade your plan to enable {integration.TrimStart('@')} integration.");
+
+            if (settings == null)
+                project.NotificationSettings.Remove(integration);
+            else
+                project.NotificationSettings[integration] = settings;
+
+            await _repository.SaveAsync(project, o => o.Cache());
             return Ok();
         }
 
@@ -326,12 +384,12 @@ namespace Exceptionless.Api.Controllers {
             if (project == null)
                 return NotFound();
 
-            if (!Request.IsGlobalAdmin() && !String.Equals(ExceptionlessUser.Id, userId))
+            if (!Request.IsGlobalAdmin() && !String.Equals(CurrentUser.Id, userId))
                 return NotFound();
 
             if (project.NotificationSettings.ContainsKey(userId)) {
                 project.NotificationSettings.Remove(userId);
-                await _repository.SaveAsync(project, true);
+                await _repository.SaveAsync(project, o => o.Cache());
             }
 
             return Ok();
@@ -342,6 +400,7 @@ namespace Exceptionless.Api.Controllers {
         /// </summary>
         /// <param name="id">The identifier of the project.</param>
         /// <param name="name">The tab name.</param>
+        /// <response code="400">Invalid tab name.</response>
         /// <response code="404">The project could not be found.</response>
         [HttpPut]
         [HttpPost]
@@ -356,7 +415,7 @@ namespace Exceptionless.Api.Controllers {
 
             if (!project.PromotedTabs.Contains(name.Trim())) {
                 project.PromotedTabs.Add(name.Trim());
-                await _repository.SaveAsync(project, true);
+                await _repository.SaveAsync(project, o => o.Cache());
             }
 
             return Ok();
@@ -367,6 +426,7 @@ namespace Exceptionless.Api.Controllers {
         /// </summary>
         /// <param name="id">The identifier of the project.</param>
         /// <param name="name">The tab name.</param>
+        /// <response code="400">Invalid tab name.</response>
         /// <response code="404">The project could not be found.</response>
         [HttpDelete]
         [Route("{id:objectid}/promotedtabs")]
@@ -380,7 +440,7 @@ namespace Exceptionless.Api.Controllers {
 
             if (project.PromotedTabs.Contains(name.Trim())) {
                 project.PromotedTabs.Remove(name.Trim());
-                await _repository.SaveAsync(project, true);
+                await _repository.SaveAsync(project, o => o.Cache());
             }
 
             return Ok();
@@ -395,7 +455,7 @@ namespace Exceptionless.Api.Controllers {
         /// <response code="204">The project name is not available.</response>
         [HttpGet]
         [Route("check-name")]
-        [Route("~/" + API_PREFIX + "/organizations/{organizationId:objectid}/projects/check-name")]        
+        [Route("~/" + API_PREFIX + "/organizations/{organizationId:objectid}/projects/check-name")]
         public async Task<IHttpActionResult> IsNameAvailableAsync(string name, string organizationId = null) {
             if (await IsProjectNameAvailableInternalAsync(organizationId, name))
                 return StatusCode(HttpStatusCode.NoContent);
@@ -410,8 +470,8 @@ namespace Exceptionless.Api.Controllers {
             var organizationIds = IsInOrganization(organizationId) ? new List<string> { organizationId } : GetAssociatedOrganizationIds();
             var projects = await _repository.GetByOrganizationIdsAsync(organizationIds);
 
-            string decodedName = Uri.UnescapeDataString(name).Trim().ToLower();
-            return !projects.Documents.Any(p => String.Equals(p.Name.Trim().ToLower(), decodedName, StringComparison.OrdinalIgnoreCase));
+            string decodedName = Uri.UnescapeDataString(name).Trim().ToLowerInvariant();
+            return !projects.Documents.Any(p => String.Equals(p.Name.Trim().ToLowerInvariant(), decodedName, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>
@@ -420,11 +480,12 @@ namespace Exceptionless.Api.Controllers {
         /// <param name="id">The identifier of the project.</param>
         /// <param name="key">The key name of the data object.</param>
         /// <param name="value">Any string value.</param>
+        /// <response code="400">Invalid key or value.</response>
         /// <response code="404">The project could not be found.</response>
         [HttpPost]
         [Route("{id:objectid}/data")]
         public async Task<IHttpActionResult> PostDataAsync(string id, string key, [NakedBody]string value) {
-            if (String.IsNullOrWhiteSpace(key) || String.IsNullOrWhiteSpace(value))
+            if (String.IsNullOrWhiteSpace(key) || String.IsNullOrWhiteSpace(value) || key.StartsWith("-"))
                 return BadRequest();
 
             var project = await GetModelAsync(id, false);
@@ -432,7 +493,7 @@ namespace Exceptionless.Api.Controllers {
                 return NotFound();
 
             project.Data[key.Trim()] = value.Trim();
-            await _repository.SaveAsync(project, true);
+            await _repository.SaveAsync(project, o => o.Cache());
 
             return Ok();
         }
@@ -442,11 +503,12 @@ namespace Exceptionless.Api.Controllers {
         /// </summary>
         /// <param name="id">The identifier of the project.</param>
         /// <param name="key">The key name of the data object.</param>
+        /// <response code="400">Invalid key or value.</response>
         /// <response code="404">The project could not be found.</response>
         [HttpDelete]
         [Route("{id:objectid}/data")]
         public async Task<IHttpActionResult> DeleteDataAsync(string id, string key) {
-            if (String.IsNullOrWhiteSpace(key))
+            if (String.IsNullOrWhiteSpace(key) || key.StartsWith("-"))
                 return BadRequest();
 
             var project = await GetModelAsync(id, false);
@@ -454,7 +516,86 @@ namespace Exceptionless.Api.Controllers {
                 return NotFound();
 
             if (project.Data.Remove(key.Trim()))
-                await _repository.SaveAsync(project, true);
+                await _repository.SaveAsync(project, o => o.Cache());
+
+            return Ok();
+        }
+
+        /// <summary>
+        /// Adds slack integration to the project
+        /// </summary>
+        /// <param name="id">The identifier of the project.</param>
+        /// <param name="code">The oauth code that must be exchanged for an auth token.</param>D
+        /// <response code="400">Invalid code or error contacting slack.</response>
+        /// <response code="404">The project could not be found.</response>
+        [ApiExplorerSettings(IgnoreApi = true)]
+        [HttpPost]
+        [Route("{id:objectid}/slack")]
+        public async Task<IHttpActionResult> AddSlackAsync(string id, string code) {
+            if (String.IsNullOrWhiteSpace(code))
+                return BadRequest();
+
+            var project = await GetModelAsync(id, false);
+            if (project == null)
+                return NotFound();
+
+            if (project.Data.ContainsKey(Project.KnownDataKeys.SlackToken))
+                return StatusCode(HttpStatusCode.NotModified);
+
+            SlackToken token = null;
+            try {
+                token = await _slackService.GetAccessTokenAsync(code);
+            } catch (Exception ex) {
+                _logger.Error().Exception(ex)
+                    .Message($"Error getting slack access token: {ex.Message}")
+                    .Property("Code", code)
+                    .Tag("Slack")
+                    .Identity(CurrentUser.EmailAddress)
+                    .Property("User", CurrentUser)
+                    .SetActionContext(ActionContext)
+                    .Write();
+            }
+
+            if (token == null)
+                return BadRequest();
+
+            project.AddDefaultNotificationSettings(Project.NotificationIntegrations.Slack);
+            project.Data[Project.KnownDataKeys.SlackToken] = token;
+            await _repository.SaveAsync(project, o => o.Cache());
+
+            return Ok();
+        }
+
+        /// <summary>
+        /// Remove custom data
+        /// </summary>
+        /// <param name="id">The identifier of the project.</param>
+        /// <response code="404">The project could not be found.</response>
+        [HttpDelete]
+        [Route("{id:objectid}/slack")]
+        public async Task<IHttpActionResult> RemoveSlackAsync(string id) {
+            var project = await GetModelAsync(id, false);
+            if (project == null)
+                return NotFound();
+
+            var token = project.GetSlackToken();
+            if (token != null) {
+                try {
+                    await _slackService.RevokeAccessTokenAsync(token.AccessToken);
+                } catch (Exception ex) {
+                    _logger.Error().Exception(ex)
+                        .Message($"Error revoking slack access token: {ex.Message}")
+                        .Property("Token", token)
+                        .Tag("Slack")
+                        .Identity(CurrentUser.EmailAddress)
+                        .Property("User", CurrentUser)
+                        .SetActionContext(ActionContext)
+                        .Write();
+                }
+            }
+
+            if (project.NotificationSettings.Remove(Project.NotificationIntegrations.Slack) | project.Data.Remove(Project.KnownDataKeys.SlackToken))
+                await _repository.SaveAsync(project, o => o.Cache());
 
             return Ok();
         }
@@ -464,7 +605,7 @@ namespace Exceptionless.Api.Controllers {
 
             // TODO: We can optimize this by normalizing the project model to include the organization name.
             var viewProjects = models.OfType<ViewProject>().ToList();
-            var organizations = await _organizationRepository.GetByIdsAsync(viewProjects.Select(p => p.OrganizationId).ToArray(), true);
+            var organizations = await _organizationRepository.GetByIdsAsync(viewProjects.Select(p => p.OrganizationId).ToArray(), o => o.Cache());
             foreach (var viewProject in viewProjects) {
                 var organization = organizations.FirstOrDefault(o => o.Id == viewProject.OrganizationId);
                 if (organization != null) {
@@ -497,7 +638,7 @@ namespace Exceptionless.Api.Controllers {
         protected override Task<Project> AddModelAsync(Project value) {
             value.IsConfigured = false;
             value.NextSummaryEndOfDayTicks = SystemClock.UtcNow.Date.AddDays(1).AddHours(1).Ticks;
-            value.AddDefaultOwnerNotificationSettings(ExceptionlessUser.Id);
+            value.AddDefaultNotificationSettings(CurrentUser.Id);
             value.SetDefaultUserAgentBotPatterns();
             value.Configuration.IncrementVersion();
 
@@ -531,19 +672,16 @@ namespace Exceptionless.Api.Controllers {
         private async Task<List<ViewProject>> PopulateProjectStatsAsync(List<ViewProject> viewProjects) {
             if (viewProjects.Count <= 0)
                 return viewProjects;
-            
-            var fields = new List<FieldAggregation> {
-                new FieldAggregation { Type = FieldAggregationType.Distinct, Field = "stack_id" }
-            };
 
-            var organizations = await _organizationRepository.GetByIdsAsync(viewProjects.Select(p => p.OrganizationId).ToArray(), true);
-            var projects = viewProjects.Select(p => new Project { Id = p.Id, OrganizationId = p.OrganizationId }).ToList();
-            var sf = new ExceptionlessSystemFilterQuery(projects, organizations);
-            var ntsr = await _stats.GetNumbersTermsStatsAsync("project_id", fields, organizations.GetRetentionUtcCutoff(), DateTime.MaxValue, sf, max: viewProjects.Count);
+            var organizations = await _organizationRepository.GetByIdsAsync(viewProjects.Select(p => p.OrganizationId).ToArray(), o => o.Cache());
+            var projects = viewProjects.Select(p => new Project { Id = p.Id, CreatedUtc = p.CreatedUtc, OrganizationId = p.OrganizationId }).ToList();
+            var sf = new ExceptionlessSystemFilter(projects, organizations);
+            var systemFilter = new RepositoryQuery<PersistentEvent>().SystemFilter(sf).DateRange(organizations.GetRetentionUtcCutoff(), SystemClock.UtcNow, (PersistentEvent e) => e.Date).Index(organizations.GetRetentionUtcCutoff(), SystemClock.UtcNow);
+            var result = await _eventRepository.CountBySearchAsync(systemFilter, null, $"terms:(project_id~{viewProjects.Count} cardinality:stack_id)");
             foreach (var project in viewProjects) {
-                var term = ntsr.Terms.FirstOrDefault(t => t.Term == project.Id);
+                var term = result.Aggregations.Terms<string>("terms_project_id")?.Buckets.FirstOrDefault(t => t.Key == project.Id);
                 project.EventCount = term?.Total ?? 0;
-                project.StackCount = (long)(term?.Numbers[0] ?? 0);
+                project.StackCount = (long)(term?.Aggregations.Cardinality("cardinality_stack_id")?.Value ?? 0);
             }
 
             return viewProjects;

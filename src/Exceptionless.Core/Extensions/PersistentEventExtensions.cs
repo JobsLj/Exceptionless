@@ -11,7 +11,7 @@ namespace Exceptionless {
             keysToCopy = keysToCopy?.Length > 0 ? keysToCopy : ev.Data.Keys.ToArray();
 
             foreach (string key in keysToCopy.Where(k => !String.IsNullOrEmpty(k) && ev.Data.ContainsKey(k))) {
-                string field = key.Trim().ToLower();
+                string field = key.Trim().ToLowerInvariant();
 
                 if (field.StartsWith("@ref:")) {
                     field = field.Substring(5);
@@ -36,7 +36,7 @@ namespace Exceptionless {
                 } else if (dataType == typeof(DateTime) || dataType == typeof(DateTimeOffset)) {
                     ev.Idx[field + "-d"] = ev.Data[key];
                 } else if (dataType == typeof(string)) {
-                    var input = (string)ev.Data[key];
+                    string input = (string)ev.Data[key];
                     if (String.IsNullOrEmpty(input) || input.Length >= 1000)
                         continue;
 
@@ -46,17 +46,13 @@ namespace Exceptionless {
                     if (input[0] == '"')
                         input = input.TrimStart('"').TrimEnd('"');
 
-                    bool value;
-                    DateTimeOffset dtoValue;
-                    Decimal decValue;
-                    Double dblValue;
-                    if (Boolean.TryParse(input, out value))
+                    if (Boolean.TryParse(input, out bool value))
                         ev.Idx[field + "-b"] = value;
-                    else if (DateTimeOffset.TryParse(input, out dtoValue))
+                    else if (DateTimeOffset.TryParse(input, out DateTimeOffset dtoValue))
                         ev.Idx[field + "-d"] = dtoValue;
-                    else if (Decimal.TryParse(input, out decValue))
+                    else if (Decimal.TryParse(input, out decimal decValue))
                         ev.Idx[field + "-n"] = decValue;
-                    else if (Double.TryParse(input, out dblValue))
+                    else if (Double.TryParse(input, out double dblValue))
                         ev.Idx[field + "-n"] = dblValue;
                     else
                         ev.Idx[field + "-s"] = input;
@@ -67,7 +63,7 @@ namespace Exceptionless {
         public static string GetEventReference(this PersistentEvent ev, string name) {
             if (ev == null || String.IsNullOrEmpty(name))
                 return null;
-            
+
             return ev.Data.GetString($"@ref:{name}");
         }
 
@@ -85,7 +81,7 @@ namespace Exceptionless {
 
             ev.Data[$"@ref:{name}"] = id;
         }
-        
+
         public static string GetSessionId(this PersistentEvent ev) {
             if (ev == null)
                 return null;
@@ -96,7 +92,7 @@ namespace Exceptionless {
         public static void SetSessionId(this PersistentEvent ev, string sessionId) {
             if (ev == null)
                 return;
-            
+
             if (!IsValidIdentifier(sessionId) || String.IsNullOrEmpty(sessionId))
                 throw new ArgumentException("Session Id must contain between 8 and 100 alphanumeric or '-' characters.", nameof(sessionId));
 
@@ -117,13 +113,12 @@ namespace Exceptionless {
             if (ev == null || !ev.IsSessionStart())
                 return null;
 
-            object end;
-            if (ev.Data.TryGetValue(Event.KnownDataKeys.SessionEnd, out end) && end is DateTime)
+            if (ev.Data.TryGetValue(Event.KnownDataKeys.SessionEnd, out object end) && end is DateTime)
                 return (DateTime)end;
 
             return null;
         }
-        
+
         public static bool UpdateSessionStart(this PersistentEvent ev, DateTime lastActivityUtc, bool isSessionEnd = false, bool hasError = false) {
             if (ev == null || !ev.IsSessionStart())
                 return false;
@@ -131,7 +126,7 @@ namespace Exceptionless {
             decimal duration = ev.Value.GetValueOrDefault();
             if (duration < 0)
                 duration = 0;
-            
+
             decimal newDuration = (decimal)(lastActivityUtc - ev.Date.UtcDateTime).TotalSeconds;
             if (duration >= newDuration)
                 lastActivityUtc = ev.Date.UtcDateTime.AddSeconds((double)duration);
@@ -159,7 +154,7 @@ namespace Exceptionless {
                 Type = Event.KnownTypes.Session,
                 Value = 0
             };
-            
+
             startEvent.SetSessionId(source.GetSessionId());
             startEvent.SetUserIdentity(source.GetUserIdentity());
             startEvent.SetLocation(source.GetLocation());
@@ -198,16 +193,16 @@ namespace Exceptionless {
                     UserAgent = ri.UserAgent
                 });
             }
-            
+
             if (lastActivityUtc.HasValue)
                 startEvent.UpdateSessionStart(lastActivityUtc.Value, isSessionEnd.GetValueOrDefault());
 
             if (hasPremiumFeatures)
                 startEvent.CopyDataToIndex();
-            
+
             return startEvent;
         }
-       
+
         public static IEnumerable<string> GetIpAddresses(this PersistentEvent ev) {
             if (ev == null)
                 yield break;
@@ -217,17 +212,21 @@ namespace Exceptionless {
 
             var ri = ev.GetRequestInfo();
             if (!String.IsNullOrEmpty(ri?.ClientIpAddress)) {
-                foreach (var ip in ri.ClientIpAddress.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                foreach (string ip in ri.ClientIpAddress.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
                     yield return ip.Trim();
             }
 
             var ei = ev.GetEnvironmentInfo();
             if (!String.IsNullOrEmpty(ei?.IpAddress)) {
-                foreach (var ip in ei.IpAddress.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                foreach (string ip in ei.IpAddress.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
                     yield return ip.Trim();
             }
         }
-        
+
+        public static bool HasValidReferenceId(this PersistentEvent ev) {
+            return IsValidIdentifier(ev.ReferenceId);
+        }
+
         private static bool IsValidIdentifier(string value) {
             if (value == null)
                 return true;

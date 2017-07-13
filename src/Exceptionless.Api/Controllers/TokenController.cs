@@ -8,23 +8,23 @@ using AutoMapper;
 using Exceptionless.Api.Controllers;
 using Exceptionless.Api.Extensions;
 using Exceptionless.Api.Models;
+using Exceptionless.Api.Utility;
 using Exceptionless.Core.Authorization;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Repositories;
 using Exceptionless.Core.Models;
+using Exceptionless.Core.Queries.Validation;
 using Foundatio.Logging;
-using Foundatio.Repositories.Models;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 
 namespace Exceptionless.App.Controllers.API {
     [RoutePrefix(API_PREFIX + "/tokens")]
     [Authorize(Roles = AuthorizationRoles.User)]
-    public class TokenController : RepositoryApiController<ITokenRepository, Token, ViewToken, NewToken, Token> {
-        private readonly IApplicationRepository _applicationRepository;
+    public class TokenController : RepositoryApiController<ITokenRepository, Token, ViewToken, NewToken, UpdateToken> {
         private readonly IProjectRepository _projectRepository;
 
-        public TokenController(ITokenRepository repository, IApplicationRepository applicationRepository, IProjectRepository projectRepository, ILoggerFactory loggerFactory, IMapper mapper) : base(repository, loggerFactory, mapper) {
-            _applicationRepository = applicationRepository;
+        public TokenController(ITokenRepository repository, IProjectRepository projectRepository, IMapper mapper, QueryValidator validator, ILoggerFactory loggerFactory) : base(repository, mapper, validator, loggerFactory) {
             _projectRepository = projectRepository;
         }
 
@@ -46,8 +46,7 @@ namespace Exceptionless.App.Controllers.API {
 
             page = GetPage(page);
             limit = GetLimit(limit);
-            var options = new PagingOptions { Page = page, Limit = limit };
-            var tokens = await _repository.GetByTypeAndOrganizationIdAsync(TokenType.Access, organizationId, options);
+            var tokens = await _repository.GetByTypeAndOrganizationIdAsync(TokenType.Access, organizationId, o => o.PageNumber(page).PageLimit(limit));
             var viewTokens = (await MapCollectionAsync<ViewToken>(tokens.Documents, true)).ToList();
             return OkWithResourceLinks(viewTokens, tokens.HasMore && !NextPageExceedsSkipLimit(page, limit), page, tokens.Total);
         }
@@ -69,8 +68,7 @@ namespace Exceptionless.App.Controllers.API {
 
             page = GetPage(page);
             limit = GetLimit(limit);
-            var options = new PagingOptions { Page = page, Limit = limit };
-            var tokens = await _repository.GetByTypeAndProjectIdAsync(TokenType.Access, projectId, options);
+            var tokens = await _repository.GetByTypeAndProjectIdAsync(TokenType.Access, projectId, o => o.PageNumber(page).PageLimit(limit));
             var viewTokens = (await MapCollectionAsync<ViewToken>(tokens.Documents, true)).ToList();
             return OkWithResourceLinks(viewTokens, tokens.HasMore && !NextPageExceedsSkipLimit(page, limit), page, tokens.Total);
         }
@@ -88,7 +86,7 @@ namespace Exceptionless.App.Controllers.API {
             if (project == null)
                 return NotFound();
 
-            var token = (await _repository.GetByTypeAndProjectIdAsync(TokenType.Access, projectId, new PagingOptions { Limit = 1 })).Documents.FirstOrDefault();
+            var token = (await _repository.GetByTypeAndProjectIdAsync(TokenType.Access, projectId, o => o.PageLimit(1))).Documents.FirstOrDefault();
             if (token != null)
                 return await OkModelAsync(token);
 
@@ -177,6 +175,20 @@ namespace Exceptionless.App.Controllers.API {
         }
 
         /// <summary>
+        /// Update
+        /// </summary>
+        /// <param name="id">The identifier of the token.</param>
+        /// <param name="changes">The changes</param>
+        /// <response code="400">An error occurred while updating the token.</response>
+        /// <response code="404">The token could not be found.</response>
+        [HttpPatch]
+        [HttpPut]
+        [Route("{id:tokens}")]
+        public override Task<IHttpActionResult> PatchAsync(string id, Delta<UpdateToken> changes) {
+            return base.PatchAsync(id, changes);
+        }
+
+        /// <summary>
         /// Remove
         /// </summary>
         /// <param name="ids">A comma delimited list of token identifiers.</param>
@@ -196,14 +208,14 @@ namespace Exceptionless.App.Controllers.API {
             if (String.IsNullOrEmpty(id))
                 return null;
 
-            var model = await _repository.GetByIdAsync(id, useCache);
+            var model = await _repository.GetByIdAsync(id, o => o.Cache(useCache));
             if (model == null)
                 return null;
 
             if (!String.IsNullOrEmpty(model.OrganizationId) && !IsInOrganization(model.OrganizationId))
                 return null;
 
-            if (!String.IsNullOrEmpty(model.UserId) && model.UserId != ExceptionlessUser.Id)
+            if (!String.IsNullOrEmpty(model.UserId) && model.UserId != CurrentUser.Id)
                 return null;
 
             if (model.Type != TokenType.Access)
@@ -224,12 +236,12 @@ namespace Exceptionless.App.Controllers.API {
                 return PermissionResult.DenyWithMessage("Token can't be associated to both user and project.");
 
             foreach (string scope in value.Scopes.ToList()) {
-                if (scope != scope.ToLower()) {
+                if (scope != scope.ToLowerInvariant()) {
                     value.Scopes.Remove(scope);
-                    value.Scopes.Add(scope.ToLower());
+                    value.Scopes.Add(scope.ToLowerInvariant());
                 }
 
-                if (!AuthorizationRoles.AllScopes.Contains(scope.ToLower()))
+                if (!AuthorizationRoles.AllScopes.Contains(scope.ToLowerInvariant()))
                     return PermissionResult.DenyWithMessage("Invalid token scope requested.");
             }
 
@@ -260,18 +272,12 @@ namespace Exceptionless.App.Controllers.API {
                     return PermissionResult.Deny;
             }
 
-            if (!String.IsNullOrEmpty(value.ApplicationId)) {
-                var application = await _applicationRepository.GetByIdAsync(value.ApplicationId, true);
-                if (application == null || !IsInOrganization(application.OrganizationId))
-                    return PermissionResult.Deny;
-            }
-
             return await base.CanAddAsync(value);
         }
 
         protected override Task<Token> AddModelAsync(Token value) {
             value.Id = StringExtensions.GetNewToken();
-            value.CreatedUtc = value.ModifiedUtc = SystemClock.UtcNow;
+            value.CreatedUtc = value.UpdatedUtc = SystemClock.UtcNow;
             value.Type = TokenType.Access;
             value.CreatedBy = Request.GetUser().Id;
 
@@ -296,7 +302,7 @@ namespace Exceptionless.App.Controllers.API {
             if (String.IsNullOrEmpty(projectId))
                 return null;
 
-            var project = await _projectRepository.GetByIdAsync(projectId, useCache);
+            var project = await _projectRepository.GetByIdAsync(projectId, o => o.Cache(useCache));
             if (project == null || !CanAccessOrganization(project.OrganizationId))
                 return null;
 

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using Foundatio.Repositories.Models;
 
@@ -11,6 +12,8 @@ namespace Exceptionless.Core.Models {
             NotificationSettings = new Dictionary<string, NotificationSettings>();
             PromotedTabs = new HashSet<string>();
             DeleteBotDataEnabled = false;
+            Usage = new Collection<UsageInfo>();
+            OverageHours = new Collection<UsageInfo>();
             Data = new DataDictionary();
         }
 
@@ -24,13 +27,23 @@ namespace Exceptionless.Core.Models {
         public string Name { get; set; }
 
         /// <summary>
-        /// Returns true if we've detected that the project has recieved data.
+        /// Returns true if we've detected that the project has received data.
         /// </summary>
         public bool? IsConfigured { get; set; }
 
         public ClientConfiguration Configuration { get; set; }
 
         public Dictionary<string, NotificationSettings> NotificationSettings { get; set; }
+
+        /// <summary>
+        /// Hours over event limit.
+        /// </summary>
+        public ICollection<UsageInfo> OverageHours { get; set; }
+
+        /// <summary>
+        /// Account event usage information.
+        /// </summary>
+        public ICollection<UsageInfo> Usage { get; set; }
 
         /// <summary>
         /// Optional data entries that contain additional configuration information for this project.
@@ -50,9 +63,14 @@ namespace Exceptionless.Core.Models {
         public Int64 NextSummaryEndOfDayTicks { get; set; }
 
         public DateTime CreatedUtc { get; set; }
+        public DateTime UpdatedUtc { get; set; }
 
-        public DateTime ModifiedUtc { get; set; }
+        public static class NotificationIntegrations {
+            public const string Slack = "slack";
+        }
 
-        DateTime IHaveDates.UpdatedUtc { get { return ModifiedUtc; } set { ModifiedUtc = value; } }
+        public static class KnownDataKeys {
+            public const string SlackToken = "-@slack";
+        }
     }
 }

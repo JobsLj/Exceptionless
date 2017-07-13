@@ -1,5 +1,5 @@
-version: 3.5.{build}
-os: Visual Studio 2015
+﻿version: 4.0.{build}
+os: Visual Studio 2017
 configuration: Release
 clone_depth: 2
 
@@ -8,7 +8,6 @@ pull_requests:
 
 environment:
   JAVA_HOME: C:\Progra~1\Java\jdk1.8.0
-  ES_VERSION: 1.7.5
   API_URL: https://#{api.hostheader}
   BUILD_REPO_URL:
     secure: vuYBT6D5arel88+Py/H3nnMPd4hInIXvr2cwhJaZSSSvJnmg+9sX1P5+bTWaJskYpGztHVMg0Iq7hgUCMKjh23w8WBrutLiUsixRE0LBjroIVJaRsYG1okSko0fNKVOCUMQAue0lh2sYqQ/TQlDbwg==
@@ -30,8 +29,7 @@ assembly_info:
 
 before_build:
   - nuget restore -verbosity quiet
-  - ps: .\build\Start-ElasticSearch.ps1
-  - SET PATH="C:\Program Files (x86)\MSBuild\14.0\Bin";%PATH%"
+  - ps: .\build\Start-ElasticSearch.ps1 -NodeCount 1 -StartKibana $false
 
 build:
   parallel: true
@@ -68,7 +66,7 @@ notifications:
   - provider: Slack
     channel: '#notifications'
     auth_token:
-      secure: GniMpFE62HprSyQNQoej/fBOAdbQe8EMWAMMNXX0s2JxeNePjemiO1bCf4eYweE4p70mm0sCwMjeEP/Ps9aTMA==
+      secure: GniMpFE62HprSyQNQoej/VSBnxn2GNnTrca3BnF8+ikMdqduO4Ts4t297teZF6wDAmGwnOtXusctUla8+WxLFkIztvVCS2Z1RG/DvEDYoc0=
     on_build_success: true
     on_build_failure: true
     on_build_status_changed: false

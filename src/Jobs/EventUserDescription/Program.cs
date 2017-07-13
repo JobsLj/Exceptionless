@@ -1,7 +1,7 @@
 ﻿using System;
 using Exceptionless.Core;
 using Exceptionless.Core.Extensions;
-using Foundatio.Extensions;
+using Foundatio.Utility;
 using Foundatio.Jobs;
 using Foundatio.ServiceProviders;
 
@@ -13,7 +13,7 @@ namespace EventUserDescriptionsJob {
             var loggerFactory = Settings.Current.GetLoggerFactory();
             var serviceProvider = ServiceProvider.GetServiceProvider(Settings.JobBootstrappedServiceProvider, loggerFactory);
             var job = serviceProvider.GetService<Exceptionless.Core.Jobs.EventUserDescriptionsJob>();
-            return new JobRunner(job, loggerFactory, initialDelay: TimeSpan.FromSeconds(3), interval: TimeSpan.Zero).RunInConsole();
+            return new JobRunner(job, loggerFactory, initialDelay: TimeSpan.FromSeconds(3), interval: TimeSpan.Zero, iterationLimit: Settings.Current.JobsIterationLimit).RunInConsole();
         }
     }
 }

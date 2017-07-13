@@ -80,12 +80,12 @@ namespace Exceptionless.Api.Extensions {
         }
 
         public static string GetDefaultOrganizationId(this HttpRequestMessage message) {
-            // TODO: Try to figure out the 1st organization that the user owns instead of just selecting from associated orgs.
+            // TODO: Try to figure out the 1st organization that the user owns instead of just selecting from associated organizations.
             return message?.GetAssociatedOrganizationIds().FirstOrDefault();
         }
 
         public static string GetDefaultProjectId(this HttpRequestMessage message) {
-            // Use project id from url. E.G., /api/v{version:int=2}/projects/{projectId:objectid}/events
+            // TODO: Use project id from url. E.G., /api/v{version:int=2}/projects/{projectId:objectid}/events
             //var path = message.RequestUri.AbsolutePath;
 
             var principal = message.GetClaimsPrincipal();
@@ -112,7 +112,7 @@ namespace Exceptionless.Api.Extensions {
         public static AuthInfo GetBasicAuth(this HttpRequestMessage request) {
             var authHeader = request?.Headers.Authorization;
 
-            if (authHeader == null || authHeader.Scheme.ToLower() != "basic")
+            if (authHeader == null || authHeader.Scheme.ToLowerInvariant() != "basic")
                 return null;
 
             string data = Encoding.UTF8.GetString(Convert.FromBase64String(authHeader.Parameter));

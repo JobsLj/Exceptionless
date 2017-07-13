@@ -14,11 +14,12 @@ using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Mail;
 using Exceptionless.Core.Repositories;
 using Exceptionless.Core.Models;
+using Exceptionless.Core.Queries.Validation;
 using Exceptionless.DateTimeExtensions;
 using FluentValidation;
 using Foundatio.Caching;
 using Foundatio.Logging;
-using Foundatio.Repositories.Models;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 
 namespace Exceptionless.Api.Controllers {
@@ -29,7 +30,7 @@ namespace Exceptionless.Api.Controllers {
         private readonly ICacheClient _cache;
         private readonly IMailer _mailer;
 
-        public UserController(IUserRepository userRepository, IOrganizationRepository organizationRepository, ICacheClient cacheClient, IMailer mailer, ILoggerFactory loggerFactory, IMapper mapper) : base(userRepository, loggerFactory, mapper) {
+        public UserController(IUserRepository userRepository, IOrganizationRepository organizationRepository, ICacheClient cacheClient, IMailer mailer, IMapper mapper, QueryValidator validator, ILoggerFactory loggerFactory) : base(userRepository, mapper, validator, loggerFactory) {
             _organizationRepository = organizationRepository;
             _cache = new ScopedCacheClient(cacheClient, "User");
             _mailer = mailer;
@@ -43,7 +44,7 @@ namespace Exceptionless.Api.Controllers {
         [Route("me")]
         [ResponseType(typeof(ViewCurrentUser))]
         public async Task<IHttpActionResult> GetCurrentUserAsync() {
-            var currentUser = await GetModelAsync(ExceptionlessUser.Id);
+            var currentUser = await GetModelAsync(CurrentUser.Id);
             if (currentUser == null)
                 return NotFound();
 
@@ -76,18 +77,17 @@ namespace Exceptionless.Api.Controllers {
             if (!CanAccessOrganization(organizationId))
                 return NotFound();
 
-            var organization = await _organizationRepository.GetByIdAsync(organizationId, true);
+            var organization = await _organizationRepository.GetByIdAsync(organizationId, o => o.Cache());
             if (organization == null)
                 return NotFound();
 
             page = GetPage(page);
             limit = GetLimit(limit);
-            var skip = GetSkip(page, limit);
+            int skip = GetSkip(page, limit);
             if (skip > MAXIMUM_SKIP)
                 return Ok(Enumerable.Empty<ViewUser>());
 
-            var options = new PagingOptions { Limit = MAXIMUM_SKIP };
-            var results = await _repository.GetByOrganizationIdAsync(organizationId, options);
+            var results = await _repository.GetByOrganizationIdAsync(organizationId, o => o.PageLimit(MAXIMUM_SKIP));
             var users = (await MapCollectionAsync<ViewUser>(results.Documents, true)).ToList();
             if (organization.Invites.Any()) {
                 users.AddRange(organization.Invites.Select(i => new ViewUser {
@@ -129,29 +129,29 @@ namespace Exceptionless.Api.Controllers {
             if (user == null)
                 return NotFound();
 
-            email = email.ToLower();
-            if (String.Equals(ExceptionlessUser.EmailAddress, email, StringComparison.OrdinalIgnoreCase))
+            email = email.Trim().ToLowerInvariant();
+            if (String.Equals(CurrentUser.EmailAddress, email, StringComparison.InvariantCultureIgnoreCase))
                 return Ok(new UpdateEmailAddressResult { IsVerified = user.IsEmailAddressVerified });
 
             // Only allow 3 email address updates per hour period by a single user.
-            string updateEmailAddressAttemptsCacheKey = $"{ExceptionlessUser.Id}:attempts";
+            string updateEmailAddressAttemptsCacheKey = $"{CurrentUser.Id}:attempts";
             long attempts = await _cache.IncrementAsync(updateEmailAddressAttemptsCacheKey, 1, SystemClock.UtcNow.Ceiling(TimeSpan.FromHours(1)));
             if (attempts > 3)
                 return BadRequest("Update email address rate limit reached. Please try updating later.");
 
             if (!await IsEmailAddressAvailableInternalAsync(email))
                 return BadRequest("A user with this email address already exists.");
-            
+
             user.ResetPasswordResetToken();
             user.EmailAddress = email;
-            user.IsEmailAddressVerified = user.OAuthAccounts.Count(oa => String.Equals(oa.EmailAddress(), email, StringComparison.OrdinalIgnoreCase)) > 0;
+            user.IsEmailAddressVerified = user.OAuthAccounts.Count(oa => String.Equals(oa.EmailAddress(), email, StringComparison.InvariantCultureIgnoreCase)) > 0;
             if (!user.IsEmailAddressVerified)
                 user.CreateVerifyEmailAddressToken();
             else
                 user.ResetVerifyEmailAddressToken();
 
             try {
-                await _repository.SaveAsync(user, true);
+                await _repository.SaveAsync(user, o => o.Cache());
             } catch (ValidationException ex) {
                 return BadRequest(String.Join(", ", ex.Errors));
             } catch (Exception ex) {
@@ -177,7 +177,7 @@ namespace Exceptionless.Api.Controllers {
             var user = await _repository.GetByVerifyEmailAddressTokenAsync(token);
             if (user == null) {
                 // The user may already be logged in and verified.
-                if (ExceptionlessUser != null && ExceptionlessUser.IsEmailAddressVerified)
+                if (CurrentUser != null && CurrentUser.IsEmailAddressVerified)
                     return Ok();
 
                 return NotFound();
@@ -187,7 +187,7 @@ namespace Exceptionless.Api.Controllers {
                 return BadRequest("Verify Email Address Token has expired.");
 
             user.MarkEmailAddressVerified();
-            await _repository.SaveAsync(user, true);
+            await _repository.SaveAsync(user, o => o.Cache());
 
             //ExceptionlessClient.Default.CreateFeatureUsage("Verify Email Address").AddObject(user).Submit();
             return Ok();
@@ -207,8 +207,8 @@ namespace Exceptionless.Api.Controllers {
 
             if (!user.IsEmailAddressVerified) {
                 user.CreateVerifyEmailAddressToken();
-                await _repository.SaveAsync(user, true);
-                await _mailer.SendVerifyEmailAsync(user);
+                await _repository.SaveAsync(user, o => o.Cache());
+                await _mailer.SendUserEmailVerifyAsync(user);
             }
 
             return Ok();
@@ -226,7 +226,7 @@ namespace Exceptionless.Api.Controllers {
 
             if (!user.Roles.Contains(AuthorizationRoles.GlobalAdmin)) {
                 user.Roles.Add(AuthorizationRoles.GlobalAdmin);
-                await _repository.SaveAsync(user, true);
+                await _repository.SaveAsync(user, o => o.Cache());
             }
 
             return Ok();
@@ -244,7 +244,7 @@ namespace Exceptionless.Api.Controllers {
 
             if (user.Roles.Contains(AuthorizationRoles.GlobalAdmin)) {
                 user.Roles.Remove(AuthorizationRoles.GlobalAdmin);
-                await _repository.SaveAsync(user, true);
+                await _repository.SaveAsync(user, o => o.Cache());
             }
 
             return StatusCode(HttpStatusCode.NoContent);
@@ -254,14 +254,15 @@ namespace Exceptionless.Api.Controllers {
             if (String.IsNullOrWhiteSpace(email))
                 return false;
 
-            if (ExceptionlessUser != null && String.Equals(ExceptionlessUser.EmailAddress, email, StringComparison.OrdinalIgnoreCase))
+            email = email.Trim().ToLowerInvariant();
+            if (CurrentUser != null && String.Equals(CurrentUser.EmailAddress, email, StringComparison.InvariantCultureIgnoreCase))
                 return true;
 
             return await _repository.GetByEmailAddressAsync(email) == null;
         }
 
         protected override async Task<User> GetModelAsync(string id, bool useCache = true) {
-            if (Request.IsGlobalAdmin() || String.Equals(ExceptionlessUser.Id, id))
+            if (Request.IsGlobalAdmin() || String.Equals(CurrentUser.Id, id))
                 return await base.GetModelAsync(id, useCache);
 
             return null;
@@ -271,7 +272,7 @@ namespace Exceptionless.Api.Controllers {
             if (Request.IsGlobalAdmin())
                 return base.GetModelsAsync(ids, useCache);
 
-            return base.GetModelsAsync(ids.Where(id => String.Equals(ExceptionlessUser.Id, id)).ToArray(), useCache);
+            return base.GetModelsAsync(ids.Where(id => String.Equals(CurrentUser.Id, id)).ToArray(), useCache);
         }
     }
 }

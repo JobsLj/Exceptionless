@@ -10,7 +10,7 @@ namespace Exceptionless.Core.Plugins.Formatting {
         private bool ShouldHandle(PersistentEvent ev) {
             return ev.IsSessionStart() || ev.IsSessionEnd() || ev.IsSessionHeartbeat();
         }
-        
+
         public override SummaryData GetStackSummaryData(Stack stack) {
             if (!stack.SignatureInfo.ContainsKeyWithValue("Type", Event.KnownTypes.Session, Event.KnownTypes.SessionEnd, Event.KnownTypes.SessionHeartbeat))
                 return null;
@@ -31,7 +31,7 @@ namespace Exceptionless.Core.Plugins.Formatting {
         public override SummaryData GetEventSummaryData(PersistentEvent ev) {
             if (!ShouldHandle(ev))
                 return null;
-            
+
             var data = new Dictionary<string, object> { { "SessionId", ev.GetSessionId() }, { "Type", ev.Type } };
             AddUserIdentitySummaryData(data, ev.GetUserIdentity());
 
@@ -44,13 +44,6 @@ namespace Exceptionless.Core.Plugins.Formatting {
             }
 
             return new SummaryData { TemplateKey = "event-session-summary", Data = data };
-        }
-
-        public override string GetEventViewName(PersistentEvent ev) {
-            if (!ShouldHandle(ev))
-                return null;
-
-            return "Event-Session";
         }
     }
 }

@@ -6,28 +6,75 @@ using System.Web.Http;
 using AutoMapper;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Models;
+using Exceptionless.Core.Queries.Validation;
+using Exceptionless.Core.Repositories;
+using Exceptionless.Core.Repositories.Queries;
+using Foundatio.Logging;
 using Foundatio.Repositories;
+using Foundatio.Repositories.Elasticsearch.Queries;
+using Foundatio.Repositories.Elasticsearch.Queries.Builders;
 using Foundatio.Repositories.Models;
+using Foundatio.Repositories.Queries;
 
 namespace Exceptionless.Api.Controllers {
-    public abstract class ReadOnlyRepositoryApiController<TRepository, TModel, TViewModel> : ExceptionlessApiController where TRepository : IReadOnlyRepository<TModel> where TModel : class, IIdentity, new() where TViewModel : class, IIdentity, new() {
+    public abstract class ReadOnlyRepositoryApiController<TRepository, TModel, TViewModel> : ExceptionlessApiController where TRepository : ISearchableReadOnlyRepository<TModel> where TModel : class, IIdentity, new() where TViewModel : class, IIdentity, new() {
         protected readonly TRepository _repository;
         protected static readonly bool _isOwnedByOrganization = typeof(IOwnedByOrganization).IsAssignableFrom(typeof(TModel));
         protected static readonly bool _isOrganization = typeof(TModel) == typeof(Organization);
+        protected static readonly bool _supportsSoftDeletes = typeof(ISupportSoftDeletes).IsAssignableFrom(typeof(TModel));
         protected static readonly IReadOnlyCollection<TModel> EmptyModels = new List<TModel>(0).AsReadOnly();
         protected readonly IMapper _mapper;
+        protected readonly IQueryValidator _validator;
+        protected readonly ILogger _logger;
 
-        public ReadOnlyRepositoryApiController(TRepository repository, IMapper mapper) {
+
+        public ReadOnlyRepositoryApiController(TRepository repository, IMapper mapper, IQueryValidator validator, ILoggerFactory loggerFactory) {
             _repository = repository;
             _mapper = mapper;
+            _validator = validator;
+            _logger = loggerFactory.CreateLogger(GetType());
         }
 
         public virtual async Task<IHttpActionResult> GetByIdAsync(string id) {
-            TModel model = await GetModelAsync(id);
+            var model = await GetModelAsync(id);
             if (model == null)
                 return NotFound();
 
             return await OkModelAsync(model);
+        }
+
+        protected virtual async Task<IHttpActionResult> GetCountAsync(ExceptionlessSystemFilter sf, TimeInfo ti, string filter = null, string aggregations = null) {
+            var pr = await _validator.ValidateQueryAsync(filter);
+            if (!pr.IsValid)
+                return BadRequest(pr.Message);
+
+            var far = await _validator.ValidateAggregationsAsync(aggregations);
+            if (!far.IsValid)
+                return BadRequest(far.Message);
+
+            sf.UsesPremiumFeatures = pr.UsesPremiumFeatures || far.UsesPremiumFeatures;
+            var query = new RepositoryQuery<TModel>()
+                .SystemFilter(ShouldApplySystemFilter(sf, filter) ? sf : null)
+                .DateRange(ti.Range.UtcStart, ti.Range.UtcEnd, ti.Field)
+                .Index(ti.Range.UtcStart, ti.Range.UtcEnd);
+
+            CountResult result;
+            try {
+                result = await _repository.CountBySearchAsync(query, filter, aggregations);
+            } catch (Exception ex) {
+                _logger.Error().Exception(ex)
+                    .Message("An error has occurred. Please check your filter or aggregations.")
+                    .Property("Search Filter", new { SystemFilter = sf, UserFilter = filter, Time = ti, Aggregations = aggregations })
+                    .Tag("Search")
+                    .Identity(CurrentUser.EmailAddress)
+                    .Property("User", CurrentUser)
+                    .SetActionContext(ActionContext)
+                    .Write();
+
+                return BadRequest("An error has occurred. Please check your search filter.");
+            }
+
+            return Ok(result);
         }
 
         protected async Task<IHttpActionResult> OkModelAsync(TModel model) {
@@ -38,8 +85,14 @@ namespace Exceptionless.Api.Controllers {
             if (String.IsNullOrEmpty(id))
                 return null;
 
-            TModel model = await _repository.GetByIdAsync(id, useCache);
-            if (_isOwnedByOrganization && model != null && !CanAccessOrganization(((IOwnedByOrganization)model).OrganizationId))
+            var model = await _repository.GetByIdAsync(id, o => o.Cache(useCache));
+            if (model == null)
+                return null;
+
+            if (_supportsSoftDeletes && ((ISupportSoftDeletes)model).IsDeleted)
+                return null;
+
+            if (_isOwnedByOrganization && !CanAccessOrganization(((IOwnedByOrganization)model).OrganizationId))
                 return null;
 
             return model;
@@ -49,17 +102,14 @@ namespace Exceptionless.Api.Controllers {
             if (ids == null || ids.Length == 0)
                 return EmptyModels;
 
-            var models = await _repository.GetByIdsAsync(ids, useCache);
-            if (!_isOwnedByOrganization)
-                return models;
+            var models = await _repository.GetByIdsAsync(ids, o => o.Cache(useCache));
+            if (_supportsSoftDeletes)
+                models = models.Where(m => !((ISupportSoftDeletes)m).IsDeleted).ToList();
 
-            var results = new List<TModel>();
-            foreach (var model in models) {
-                if (CanAccessOrganization(((IOwnedByOrganization)model).OrganizationId))
-                    results.Add(model);
-            }
+            if (_isOwnedByOrganization)
+                models = models.Where(m => CanAccessOrganization(((IOwnedByOrganization)m).OrganizationId)).ToList();
 
-            return results;
+            return models;
         }
 
         #region Mapping

@@ -12,9 +12,19 @@ namespace Exceptionless.Core {
         public string BaseURL { get; private set; }
 
         /// <summary>
-        /// Internal project id keeps us from recursively logging to ourself
+        /// Internal project id keeps us from recursively logging to our self
         /// </summary>
         public string InternalProjectId { get; private set; }
+
+        /// <summary>
+        /// Configures the exceptionless client api key, which logs all internal errors and log messages.
+        /// </summary>
+        public string ExceptionlessApiKey { get; private set; }
+
+        /// <summary>
+        /// Configures the exceptionless client server url, which logs all internal errors and log messages.
+        /// </summary>
+        public string ExceptionlessServerUrl { get; private set; }
 
         public WebsiteMode WebsiteMode { get; private set; }
 
@@ -24,17 +34,20 @@ namespace Exceptionless.Core {
 
         public string AppScopePrefix => HasAppScope ? AppScope + "-" : String.Empty;
 
-        public string TestEmailAddress { get; private set; }
-
-        public List<string> AllowedOutboundAddresses { get; private set; }
-
         public bool RunJobsInProcess { get; private set; }
+
+        public int JobsIterationLimit { get; set; }
 
         public int BotThrottleLimit { get; private set; }
 
         public int ApiThrottleLimit { get; private set; }
 
+        public bool EnableArchive { get; private set; }
+
         public bool EventSubmissionDisabled { get; private set; }
+
+        internal List<string> DisabledPipelineActions { get; private set; }
+        internal List<string> DisabledPlugins { get; private set; }
 
         /// <summary>
         /// In bytes
@@ -42,8 +55,6 @@ namespace Exceptionless.Core {
         public long MaximumEventPostSize { get; private set; }
 
         public int MaximumRetentionDays { get; private set; }
-
-        public bool EnableDailySummary { get; private set; }
 
         public string MetricsServerName { get; private set; }
 
@@ -55,29 +66,29 @@ namespace Exceptionless.Core {
 
         public bool EnableRedis { get; private set; }
 
+        public bool DisableSnapshotJobs { get; set; }
+
+        public bool DisableIndexConfiguration { get; set; }
+
         public string ElasticSearchConnectionString { get; private set; }
 
         public int ElasticSearchNumberOfShards { get; private set; }
 
         public int ElasticSearchNumberOfReplicas { get; private set; }
 
-        public bool EnableElasticsearchTracing { get; private set; }
+        public bool EnableElasticsearchMapperSizePlugin { get; private set; }
 
-		public string LdapConnectionString { get; private set; }
+        public string LdapConnectionString { get; private set; }
 
-		public bool EnableActiveDirectoryAuth { get; internal set; }
+        public bool EnableActiveDirectoryAuth { get; internal set; }
 
         public bool EnableSignalR { get; private set; }
 
         public string Version { get; private set; }
 
-        public LogLevel MinimumLogLevel { get; private set; }
-
         public bool EnableIntercom => !String.IsNullOrEmpty(IntercomAppSecret);
 
         public string IntercomAppSecret { get; private set; }
-
-        public bool EnableAccountCreation { get; internal set; }
 
         public string MicrosoftAppId { get; private set; }
 
@@ -97,6 +108,12 @@ namespace Exceptionless.Core {
 
         public string GoogleGeocodingApiKey { get; private set; }
 
+        public string SlackAppId { get; private set; }
+
+        public string SlackAppSecret { get; private set; }
+
+        public bool EnableSlack => !String.IsNullOrEmpty(SlackAppId);
+
         public bool EnableBilling => !String.IsNullOrEmpty(StripeApiKey);
 
         public string StripeApiKey { get; private set; }
@@ -109,15 +126,31 @@ namespace Exceptionless.Core {
 
         public int BulkBatchSize { get; private set; }
 
-        internal string SmtpHost { get; private set; }
+        public bool EnableAccountCreation { get; internal set; }
 
-        internal int SmtpPort { get; private set; }
+        public bool EnableDailySummary { get; private set; }
 
-        internal bool SmtpEnableSsl { get; private set; }
+        /// <summary>
+        /// All emails that do not match the AllowedOutboundAddresses will be sent to this address in QA mode
+        /// </summary>
+        public string TestEmailAddress { get; private set; }
 
-        internal string SmtpUser { get; private set; }
+        /// <summary>
+        /// Email addresses that match this comma delimited list of domains and email addresses will be allowed to be sent out in QA mode
+        /// </summary>
+        public List<string> AllowedOutboundAddresses { get; private set; }
 
-        internal string SmtpPassword { get; private set; }
+        public string SmtpFrom { get; private set; }
+
+        public string SmtpHost { get; private set; }
+
+        public int SmtpPort { get; private set; }
+
+        public SmtpEncryption SmtpEncryption { get; private set; }
+
+        public string SmtpUser { get; private set; }
+
+        public string SmtpPassword { get; private set; }
 
         public override void Initialize() {
             EnvironmentVariablePrefix = "Exceptionless_";
@@ -138,25 +171,30 @@ namespace Exceptionless.Core {
             }
 
             InternalProjectId = GetString(nameof(InternalProjectId), "54b56e480ef9605a88a13153");
+            ExceptionlessApiKey = GetString(nameof(ExceptionlessApiKey));
+            ExceptionlessServerUrl = GetString(nameof(ExceptionlessServerUrl));
             WebsiteMode = GetEnum<WebsiteMode>(nameof(WebsiteMode), WebsiteMode.Dev);
             AppScope = GetString(nameof(AppScope), String.Empty);
-            TestEmailAddress = GetString(nameof(TestEmailAddress));
-            AllowedOutboundAddresses = GetStringList(nameof(AllowedOutboundAddresses), "exceptionless.io").Select(v => v.ToLowerInvariant()).ToList();
+
             RunJobsInProcess = GetBool(nameof(RunJobsInProcess), true);
+            JobsIterationLimit = GetInt(nameof(JobsIterationLimit), -1);
             BotThrottleLimit = GetInt(nameof(BotThrottleLimit), 25);
             ApiThrottleLimit = GetInt(nameof(ApiThrottleLimit), Int32.MaxValue);
+            EnableArchive = GetBool(nameof(EnableArchive), true);
             EventSubmissionDisabled = GetBool(nameof(EventSubmissionDisabled));
-            MaximumEventPostSize = GetInt64(nameof(MaximumEventPostSize), Int64.MaxValue);
-            MaximumRetentionDays = GetInt(nameof(MaximumRetentionDays), -1);
-            EnableDailySummary = GetBool(nameof(EnableDailySummary));
+            DisabledPipelineActions = GetStringList(nameof(DisabledPipelineActions), String.Empty);
+            DisabledPlugins = GetStringList(nameof(DisabledPlugins), String.Empty);
+            MaximumEventPostSize = GetInt64(nameof(MaximumEventPostSize), 1000000);
+            MaximumRetentionDays = GetInt(nameof(MaximumRetentionDays), 180);
             MetricsServerName = GetString(nameof(MetricsServerName)) ?? "127.0.0.1";
             MetricsServerPort = GetInt(nameof(MetricsServerPort), 8125);
             EnableMetricsReporting = GetBool(nameof(EnableMetricsReporting));
             IntercomAppSecret = GetString(nameof(IntercomAppSecret));
-            EnableAccountCreation = GetBool(nameof(EnableAccountCreation), true);
             GoogleAppId = GetString(nameof(GoogleAppId));
             GoogleAppSecret = GetString(nameof(GoogleAppSecret));
             GoogleGeocodingApiKey = GetString(nameof(GoogleGeocodingApiKey));
+            SlackAppId = GetString(nameof(SlackAppId));
+            SlackAppSecret = GetString(nameof(SlackAppSecret));
             MicrosoftAppId = GetString(nameof(MicrosoftAppId));
             MicrosoftAppSecret = GetString(nameof(MicrosoftAppSecret));
             FacebookAppId = GetString(nameof(FacebookAppId));
@@ -167,19 +205,29 @@ namespace Exceptionless.Core {
             StorageFolder = GetString(nameof(StorageFolder));
             BulkBatchSize = GetInt(nameof(BulkBatchSize), 1000);
 
-            SmtpHost = GetString(nameof(SmtpHost));
-            SmtpPort = GetInt(nameof(SmtpPort), 587);
-            SmtpEnableSsl = GetBool(nameof(SmtpEnableSsl), true);
+            EnableAccountCreation = GetBool(nameof(EnableAccountCreation), true);
+            EnableDailySummary = GetBool(nameof(EnableDailySummary));
+            AllowedOutboundAddresses = GetStringList(nameof(AllowedOutboundAddresses), "exceptionless.io").Select(v => v.ToLowerInvariant()).ToList();
+            TestEmailAddress = GetString(nameof(TestEmailAddress), "noreply@exceptionless.io");
+            SmtpFrom = GetString(nameof(SmtpFrom), "Exceptionless <noreply@exceptionless.io>");
+            SmtpHost = GetString(nameof(SmtpHost), "localhost");
+            SmtpPort = GetInt(nameof(SmtpPort), String.Equals(SmtpHost, "localhost") ? 25 : 587);
+            SmtpEncryption = GetEnum<SmtpEncryption>(nameof(SmtpEncryption), GetDefaultSmtpEncryption(SmtpPort));
             SmtpUser = GetString(nameof(SmtpUser));
             SmtpPassword = GetString(nameof(SmtpPassword));
+
+            if (String.IsNullOrWhiteSpace(SmtpUser) != String.IsNullOrWhiteSpace(SmtpPassword))
+                throw new ArgumentException("Must specify both the SmtpUser and the SmtpPassword, or neither.");
 
             AzureStorageConnectionString = GetConnectionString(nameof(AzureStorageConnectionString));
             EnableAzureStorage = GetBool(nameof(EnableAzureStorage), !String.IsNullOrEmpty(AzureStorageConnectionString));
 
+            DisableIndexConfiguration = GetBool(nameof(DisableIndexConfiguration));
+            DisableSnapshotJobs = GetBool(nameof(DisableSnapshotJobs), !String.IsNullOrEmpty(AppScopePrefix));
             ElasticSearchConnectionString = GetConnectionString(nameof(ElasticSearchConnectionString));
             ElasticSearchNumberOfShards = GetInt(nameof(ElasticSearchNumberOfShards), 1);
             ElasticSearchNumberOfReplicas = GetInt(nameof(ElasticSearchNumberOfReplicas), 0);
-            EnableElasticsearchTracing = GetBool(nameof(EnableElasticsearchTracing));
+            EnableElasticsearchMapperSizePlugin = GetBool(nameof(EnableElasticsearchMapperSizePlugin));
 
             RedisConnectionString = GetConnectionString(nameof(RedisConnectionString));
             EnableRedis = GetBool(nameof(EnableRedis), !String.IsNullOrEmpty(RedisConnectionString));
@@ -190,15 +238,25 @@ namespace Exceptionless.Core {
             EnableSignalR = GetBool(nameof(EnableSignalR), true);
 
             Version = FileVersionInfo.GetVersionInfo(typeof(Settings).Assembly.Location).ProductVersion;
-            MinimumLogLevel = GetEnum<LogLevel>(nameof(MinimumLogLevel), LogLevel.Information);
+        }
+
+        private SmtpEncryption GetDefaultSmtpEncryption(int port) {
+            switch (port) {
+                case 465:
+                    return SmtpEncryption.SSL;
+                case 587:
+                case 2525:
+                    return SmtpEncryption.StartTLS;
+                default:
+                    return SmtpEncryption.None;
+            }
         }
 
         public const string JobBootstrappedServiceProvider = "Exceptionless.Insulation.Jobs.JobBootstrappedServiceProvider,Exceptionless.Insulation";
 
+
         public LoggerFactory GetLoggerFactory() {
-            return new LoggerFactory {
-                DefaultLogLevel = MinimumLogLevel
-            };
+            return new LoggerFactory();
         }
     }
 
@@ -206,5 +264,11 @@ namespace Exceptionless.Core {
         Production,
         QA,
         Dev
+    }
+
+    public enum SmtpEncryption {
+        None,
+        StartTLS,
+        SSL
     }
 }

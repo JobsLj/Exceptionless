@@ -11,7 +11,9 @@ using Exceptionless.DateTimeExtensions;
 using Exceptionless.Tests.Utility;
 using Foundatio.Caching;
 using Foundatio.Jobs;
+using Foundatio.Repositories;
 using Foundatio.Utility;
+using Nest;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -48,7 +50,7 @@ namespace Exceptionless.Api.Tests.Jobs {
             Assert.True(contexts.All(c => !c.IsCancelled));
             Assert.True(contexts.All(c => c.IsProcessed));
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             var events = await _eventRepository.GetAllAsync();
             Assert.Equal(4, events.Total);
             Assert.Equal(2, events.Documents.Where(e => !String.IsNullOrEmpty(e.GetSessionId())).Select(e => e.GetSessionId()).Distinct().Count());
@@ -61,7 +63,7 @@ namespace Exceptionless.Api.Tests.Jobs {
 
             _job.DefaultInactivePeriod = TimeSpan.FromMinutes(3);
             Assert.Equal(JobResult.Success, await _job.RunAsync());
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             events = await _eventRepository.GetAllAsync();
             Assert.Equal(4, events.Total);
 
@@ -83,7 +85,7 @@ namespace Exceptionless.Api.Tests.Jobs {
             Assert.True(contexts.All(c => !c.IsCancelled));
             Assert.True(contexts.All(c => c.IsProcessed));
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             var events = await _eventRepository.GetAllAsync();
             Assert.Equal(4, events.Total);
             Assert.Equal(2, events.Documents.Where(e => !String.IsNullOrEmpty(e.GetSessionId())).Select(e => e.GetSessionId()).Distinct().Count());
@@ -97,7 +99,7 @@ namespace Exceptionless.Api.Tests.Jobs {
 
             _job.DefaultInactivePeriod = TimeSpan.FromMinutes(3);
             Assert.Equal(JobResult.Success, await _job.RunAsync());
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             events = await _eventRepository.GetAllAsync();
             Assert.Equal(4, events.Total);
 
@@ -122,7 +124,7 @@ namespace Exceptionless.Api.Tests.Jobs {
             Assert.False(context.IsCancelled);
             Assert.True(context.IsProcessed);
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             var events = await _eventRepository.GetAllAsync();
             Assert.Equal(2, events.Total);
             Assert.Equal(1, events.Documents.Where(e => !String.IsNullOrEmpty(e.GetSessionId())).Select(e => e.GetSessionId()).Distinct().Count());
@@ -139,7 +141,7 @@ namespace Exceptionless.Api.Tests.Jobs {
 
             _job.DefaultInactivePeriod = TimeSpan.FromMinutes(defaultInactivePeriodInMinutes);
             Assert.Equal(JobResult.Success, await _job.RunAsync());
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
             events = await _eventRepository.GetAllAsync();
             Assert.Equal(2, events.Total);
 
@@ -155,7 +157,7 @@ namespace Exceptionless.Api.Tests.Jobs {
         }
 
         private async Task CreateDataAsync() {
-            foreach (Organization organization in OrganizationData.GenerateSampleOrganizations()) {
+            foreach (var organization in OrganizationData.GenerateSampleOrganizations()) {
                 if (organization.Id == TestConstants.OrganizationId3)
                     BillingManager.ApplyBillingPlan(organization, BillingManager.FreePlan, UserData.GenerateSampleUser());
                 else
@@ -171,12 +173,12 @@ namespace Exceptionless.Api.Tests.Jobs {
                     organization.SuspensionDate = SystemClock.UtcNow;
                 }
 
-                await _organizationRepository.AddAsync(organization, true);
+                await _organizationRepository.AddAsync(organization, o => o.Cache());
             }
 
-            await _projectRepository.AddAsync(ProjectData.GenerateSampleProjects(), true);
+            await _projectRepository.AddAsync(ProjectData.GenerateSampleProjects(), o => o.Cache());
 
-            foreach (User user in UserData.GenerateSampleUsers()) {
+            foreach (var user in UserData.GenerateSampleUsers()) {
                 if (user.Id == TestConstants.UserId) {
                     user.OrganizationIds.Add(TestConstants.OrganizationId2);
                     user.OrganizationIds.Add(TestConstants.OrganizationId3);
@@ -185,10 +187,10 @@ namespace Exceptionless.Api.Tests.Jobs {
                 if (!user.IsEmailAddressVerified)
                     user.CreateVerifyEmailAddressToken();
 
-                await _userRepository.AddAsync(user, true);
+                await _userRepository.AddAsync(user, o => o.Cache());
             }
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
         }
 
         private PersistentEvent GenerateEvent(DateTimeOffset? occurrenceDate = null, string userIdentity = null, string type = null, string sessionId = null) {

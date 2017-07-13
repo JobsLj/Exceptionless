@@ -1,9 +1,9 @@
 ﻿using System;
+using System.Threading;
 using Exceptionless.Api.Tests.Authentication;
 using Exceptionless.Api.Tests.Mail;
 using Exceptionless.Core.Authentication;
 using Exceptionless.Core.Mail;
-using Foundatio.Extensions;
 using Foundatio.Logging;
 using Foundatio.Logging.Xunit;
 using Foundatio.Utility;
@@ -14,10 +14,10 @@ namespace Exceptionless.Api.Tests {
     public abstract class TestBase : TestWithLoggingBase, IDisposable {
         private Container _container;
         private bool _initialized;
+        private readonly IDisposable _testSystemClock = TestSystemClock.Install();
+        private readonly CancellationTokenSource _disposedCancellationTokenSource = new CancellationTokenSource();
 
         public TestBase(ITestOutputHelper output) : base(output) {
-            SystemClock.Reset();
-
             Log.MinimumLevel = LogLevel.Information;
             Log.SetLogLevel<ScheduledTimer>(LogLevel.Warning);
         }
@@ -35,19 +35,21 @@ namespace Exceptionless.Api.Tests {
         }
 
         protected virtual void RegisterServices(Container container) {
-            Bootstrapper.RegisterServices(container, Log);
+            Bootstrapper.RegisterServices(container, Log, _disposedCancellationTokenSource.Token);
 
             container.Register<IMailer, NullMailer>();
             container.Register<IDomainLoginProvider, TestDomainLoginProvider>();
         }
 
         public Container GetDefaultContainer() {
-            var container = AppBuilder.CreateContainer(Log, _logger, false);
+            var container = AppBuilder.CreateContainer(Log, _logger, _disposedCancellationTokenSource.Token);
             RegisterServices(container);
             return container;
         }
-        
+
         public virtual void Dispose() {
+            _disposedCancellationTokenSource.Cancel();
+            _testSystemClock.Dispose();
             _container?.Dispose();
         }
     }

@@ -1,22 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using Exceptionless.Core.Pipeline;
 using Exceptionless.Core.Extensions;
-using Exceptionless.Core.Mail.Models;
 using Exceptionless.Core.Models;
-using Exceptionless.Core.Queues.Models;
-using RazorSharpEmail;
 
 namespace Exceptionless.Core.Plugins.Formatting {
     [Priority(20)]
     public sealed class ErrorFormattingPlugin : FormattingPluginBase {
-        private readonly IEmailGenerator _emailGenerator;
-
-        public ErrorFormattingPlugin(IEmailGenerator emailGenerator) {
-            _emailGenerator = emailGenerator;
-        }
-
         private bool ShouldHandle(PersistentEvent ev) {
             return ev.IsError() && ev.Data.ContainsKey(Event.KnownDataKeys.Error);
         }
@@ -32,16 +22,15 @@ namespace Exceptionless.Core.Plugins.Formatting {
         public override SummaryData GetStackSummaryData(Stack stack) {
             if (stack.SignatureInfo == null || !stack.SignatureInfo.ContainsKey("ExceptionType"))
                 return null;
-            
+
             var data = new Dictionary<string, object>();
-            string value;
-            if (stack.SignatureInfo.TryGetValue("ExceptionType", out value) && !String.IsNullOrEmpty(value)) {
-                data.Add("Type", value.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries).Last());
+            if (stack.SignatureInfo.TryGetValue("ExceptionType", out string value) && !String.IsNullOrEmpty(value)) {
+                data.Add("Type", value.TypeName());
                 data.Add("TypeFullName", value);
             }
 
             if (stack.SignatureInfo.TryGetValue("Method", out value) && !String.IsNullOrEmpty(value)) {
-                string method = value.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries).Last();
+                string method = value.TypeName();
                 int index = method.IndexOf('(');
                 data.Add("Method", index > 0 ? method.Substring(0, index) : method);
                 data.Add("MethodFullName", value);
@@ -59,7 +48,7 @@ namespace Exceptionless.Core.Plugins.Formatting {
         public override SummaryData GetEventSummaryData(PersistentEvent ev) {
             if (!ShouldHandle(ev))
                 return null;
-            
+
             var stackingTarget = ev.GetStackingTarget();
             if (stackingTarget?.Error == null)
                 return null;
@@ -68,7 +57,7 @@ namespace Exceptionless.Core.Plugins.Formatting {
             AddUserIdentitySummaryData(data, ev.GetUserIdentity());
 
             if (!String.IsNullOrEmpty(stackingTarget.Error.Type)) {
-                data.Add("Type", stackingTarget.Error.Type.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries).Last());
+                data.Add("Type", stackingTarget.Error.Type.TypeName());
                 data.Add("TypeFullName", stackingTarget.Error.Type);
             }
 
@@ -84,44 +73,88 @@ namespace Exceptionless.Core.Plugins.Formatting {
             return new SummaryData { TemplateKey = "event-error-summary", Data = data };
         }
 
-        public override MailMessage GetEventNotificationMailMessage(EventNotification model) {
-            if (!ShouldHandle(model.Event))
+        public override MailMessageData GetEventNotificationMailMessageData(PersistentEvent ev, bool isCritical, bool isNew, bool isRegression) {
+            if (!ShouldHandle(ev))
                 return null;
 
-            var error = model.Event.GetError();
+            var error = ev.GetError();
             var stackingTarget = error?.GetStackingTarget();
             if (stackingTarget?.Error == null)
                 return null;
 
-            var requestInfo = model.Event.GetRequestInfo();
-            string errorType = !String.IsNullOrEmpty(stackingTarget.Error.Type) ? stackingTarget.Error.Type : "Error";
+            string errorTypeName = null;
+            if (!String.IsNullOrEmpty(stackingTarget.Error.Type))
+                errorTypeName = stackingTarget.Error.Type.TypeName().Truncate(60);
 
+            string errorType = !String.IsNullOrEmpty(errorTypeName) ? errorTypeName : "Error";
             string notificationType = String.Concat(errorType, " occurrence");
-            if (model.IsNew)
-                notificationType = String.Concat(!model.IsCritical ? "New " : "new ", error.Type);
-            else if (model.IsRegression)
+            if (isNew)
+                notificationType = String.Concat(!isCritical ? "New " : "new ", errorType);
+            else if (isRegression)
                 notificationType = String.Concat(errorType, " regression");
 
-            if (model.IsCritical)
+            if (isCritical)
                 notificationType = String.Concat("Critical ", notificationType);
 
-            var mailerModel = new EventNotificationModel(model) {
-                BaseUrl = Settings.Current.BaseURL,
-                Subject = String.Concat(notificationType, ": ", stackingTarget.Error.Message.Truncate(120)),
-                Url = requestInfo?.GetFullPath(true, true, true),
-                Message = stackingTarget.Error.Message,
-                TypeFullName = errorType,
-                MethodFullName = stackingTarget.Method?.GetFullName()
-            };
+            string subject = String.Concat(notificationType, ": ", stackingTarget.Error.Message).Truncate(120);
+            var data = new Dictionary<string, object> { { "Message", stackingTarget.Error.Message.Truncate(60) } };
+            if (!String.IsNullOrEmpty(errorTypeName))
+                data.Add("Type", errorTypeName);
 
-            return _emailGenerator.GenerateMessage(mailerModel, "NoticeError").ToMailMessage();
+            if (stackingTarget.Method != null)
+                data.Add("Method", stackingTarget.Method.Name.Truncate(60));
+
+            var requestInfo = ev.GetRequestInfo();
+            if (requestInfo != null)
+                data.Add("Url", requestInfo.GetFullPath(true, true, true));
+
+            return new MailMessageData { Subject = subject, Data = data };
         }
 
-        public override string GetEventViewName(PersistentEvent ev) {
+        public override SlackMessage GetSlackEventNotification(PersistentEvent ev, Project project, bool isCritical, bool isNew, bool isRegression) {
             if (!ShouldHandle(ev))
                 return null;
 
-            return "Event-Error";
+            var error = ev.GetError();
+            var stackingTarget = error?.GetStackingTarget();
+            if (stackingTarget?.Error == null)
+                return null;
+
+            string errorTypeName = null;
+            if (!String.IsNullOrEmpty(stackingTarget.Error.Type))
+                errorTypeName = stackingTarget.Error.Type.TypeName().Truncate(60);
+
+            string errorType = !String.IsNullOrEmpty(errorTypeName) ? errorTypeName : "error";
+            string notificationType = String.Concat(errorType, " occurrence");
+            if (isNew)
+                notificationType = String.Concat("new ", errorType);
+            else if (isRegression)
+                notificationType = String.Concat(errorType, " regression");
+
+            if (isCritical)
+                notificationType = String.Concat("critical ", notificationType);
+
+            var attachment = new SlackMessage.SlackAttachment(ev) {
+                Color = "#BB423F",
+                Fields = new List<SlackMessage.SlackAttachmentFields> {
+                    new SlackMessage.SlackAttachmentFields {
+                        Title = "Message",
+                        Value = stackingTarget.Error.Message.Truncate(60)
+                    }
+                }
+            };
+
+            if (!String.IsNullOrEmpty(errorTypeName))
+                attachment.Fields.Add(new SlackMessage.SlackAttachmentFields { Title = "Type", Value = errorTypeName });
+
+            if (stackingTarget.Method != null)
+                attachment.Fields.Add(new SlackMessage.SlackAttachmentFields { Title = "Method", Value = stackingTarget.Method.Name.Truncate(60) });
+
+            AddDefaultSlackFields(ev, attachment.Fields);
+            string subject = $"[{project.Name}] A {notificationType}: *{GetSlackEventUrl(ev.Id, stackingTarget.Error.Message.Truncate(120))}*";
+            return new SlackMessage(subject) {
+                Attachments = new List<SlackMessage.SlackAttachment> { attachment }
+            };
         }
     }
 }

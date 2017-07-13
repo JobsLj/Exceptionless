@@ -7,6 +7,7 @@ using Exceptionless.Core.Dependency;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Helpers;
 using Foundatio.Logging;
+using Foundatio.Metrics;
 
 namespace Exceptionless.Core.Pipeline {
     /// <summary>
@@ -24,12 +25,19 @@ namespace Exceptionless.Core.Pipeline {
         protected static readonly ConcurrentDictionary<Type, IList<Type>> _actionTypeCache = new ConcurrentDictionary<Type, IList<Type>>();
         private readonly IDependencyResolver _dependencyResolver;
         private readonly IList<IPipelineAction<TContext>> _actions;
+        protected readonly string _metricPrefix;
+        protected readonly IMetricsClient _metricsClient;
         protected readonly ILogger _logger;
 
-        public PipelineBase(IDependencyResolver dependencyResolver = null, ILoggerFactory loggerFactory = null) {
+        public PipelineBase(IDependencyResolver dependencyResolver = null, IMetricsClient metricsClient = null, ILoggerFactory loggerFactory = null) {
             _dependencyResolver = dependencyResolver ?? new DefaultDependencyResolver();
-            _actions = GetActionTypes().Select(t => _dependencyResolver.GetService(t) as IPipelineAction<TContext>).ToList();
-            _logger = loggerFactory.CreateLogger(GetType());
+
+            var type = GetType();
+            _metricPrefix = String.Concat(type.Name.ToLower(), ".");
+            _metricsClient = metricsClient ?? new InMemoryMetricsClient(new InMemoryMetricsClientOptions { LoggerFactory = loggerFactory });
+            _logger = loggerFactory.CreateLogger(type);
+
+            _actions = LoadDefaultActions();
         }
 
         /// <summary>
@@ -48,14 +56,16 @@ namespace Exceptionless.Core.Pipeline {
         public virtual async Task<ICollection<TContext>> RunAsync(ICollection<TContext> contexts) {
             PipelineRunning(contexts);
 
+            string metricPrefix = String.Concat(_metricPrefix, nameof(RunAsync).ToLower(), ".");
             foreach (var action in _actions) {
-                await action.ProcessBatchAsync(contexts.Where(c => c.IsCancelled == false && !c.HasError).ToList()).AnyContext();
-                if (contexts.All(c => c.IsCancelled || c.HasError))
+                string metricName = String.Concat(metricPrefix, action.Name.ToLower());
+                var contextsToProcess = contexts.Where(c => c.IsCancelled == false && !c.HasError).ToList();
+                await _metricsClient.TimeAsync(() => action.ProcessBatchAsync(contextsToProcess), metricName).AnyContext();
+                if (contextsToProcess.All(c => c.IsCancelled || c.HasError))
                     break;
             }
 
             contexts.ForEach(c => c.IsProcessed = c.IsCancelled == false && !c.HasError);
-
             PipelineCompleted(contexts);
 
             return contexts;
@@ -79,6 +89,25 @@ namespace Exceptionless.Core.Pipeline {
         /// <returns>An enumerable list of action types in priority order to run for the pipeline.</returns>
         protected virtual IList<Type> GetActionTypes() {
             return _actionTypeCache.GetOrAdd(typeof(TAction), t => TypeHelper.GetDerivedTypes<TAction>().SortByPriority());
+        }
+
+        private List<IPipelineAction<TContext>> LoadDefaultActions() {
+            var actions = new List<IPipelineAction<TContext>>();
+            foreach (var type in GetActionTypes()) {
+                if (Settings.Current.DisabledPipelineActions.Contains(type.Name, StringComparer.InvariantCultureIgnoreCase)) {
+                    _logger.Warn(() => $"Pipeline Action {type.Name} is currently disabled and won't be executed.");
+                    continue;
+                }
+
+                try {
+                    actions.Add((IPipelineAction<TContext>)_dependencyResolver.GetService(type));
+                } catch (Exception ex) {
+                    _logger.Error(ex, "Unable to instantiate Pipeline Action of type \"{0}\": {1}", type.FullName, ex.Message);
+                    throw;
+                }
+            }
+
+            return actions;
         }
     }
 }

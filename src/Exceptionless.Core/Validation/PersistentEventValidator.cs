@@ -1,5 +1,6 @@
 using System;
-using Exceptionless.Core.Extensions;
+using System.Threading;
+using System.Threading.Tasks;
 using Exceptionless.Core.Models;
 using FluentValidation;
 using FluentValidation.Results;
@@ -7,8 +8,9 @@ using Foundatio.Utility;
 
 namespace Exceptionless.Core.Validation {
     public class PersistentEventValidator : AbstractValidator<PersistentEvent> {
-        public override ValidationResult Validate(PersistentEvent ev) {
+        public override ValidationResult Validate(ValidationContext<PersistentEvent> context) {
             var result = new ValidationResult();
+            var ev = context.InstanceToValidate;
 
             if (!IsObjectId(ev.Id))
                 result.Errors.Add(new ValidationFailure("Id", "Please specify a valid id."));
@@ -28,7 +30,9 @@ namespace Exceptionless.Core.Validation {
             if (ev.Date.UtcDateTime > SystemClock.UtcNow.AddHours(1))
                 result.Errors.Add(new ValidationFailure("Date", "Date cannot be in the future."));
 
-            if (String.IsNullOrEmpty(ev.Type) || ev.Type.Length > 100)
+            if (String.IsNullOrEmpty(ev.Type))
+                result.Errors.Add(new ValidationFailure("Type", "Type must be specified"));
+            else if (ev.Type.Length > 100)
                 result.Errors.Add(new ValidationFailure("Type", "Type cannot be longer than 100 characters."));
 
             if (ev.Message != null && (ev.Message.Length < 1 || ev.Message.Length > 2000))
@@ -37,10 +41,10 @@ namespace Exceptionless.Core.Validation {
             if (ev.Source != null && (ev.Source.Length < 1 || ev.Source.Length > 2000))
                 result.Errors.Add(new ValidationFailure("Source", "Source cannot be longer than 2000 characters."));
 
-            if (!IsValidIdentifier(ev.ReferenceId))
+            if (!ev.HasValidReferenceId())
                 result.Errors.Add(new ValidationFailure("ReferenceId", "ReferenceId must contain between 8 and 100 alphanumeric or '-' characters."));
-            
-            foreach (var tag in ev.Tags) {
+
+            foreach (string tag in ev.Tags) {
                 if (String.IsNullOrEmpty(tag))
                     result.Errors.Add(new ValidationFailure("Tags", "Tags can't be empty."));
                 else if (tag.Length > 255)
@@ -50,14 +54,8 @@ namespace Exceptionless.Core.Validation {
             return result;
         }
 
-        private bool IsValidIdentifier(string value) {
-            if (value == null)
-                return true;
-
-            if (value.Length < 8 || value.Length > 100)
-                return false;
-
-            return value.IsValidIdentifier();
+        public override Task<ValidationResult> ValidateAsync(ValidationContext<PersistentEvent> context, CancellationToken cancellation = new CancellationToken()) {
+            return Task.FromResult(Validate(context.InstanceToValidate));
         }
 
         private bool IsObjectId(string value) {

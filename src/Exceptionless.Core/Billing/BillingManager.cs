@@ -23,7 +23,7 @@ namespace Exceptionless.Core.Billing {
             if (user == null)
                 return false;
 
-            var organizations = (await _organizationRepository.GetByIdsAsync(user.OrganizationIds).AnyContext()).Where(o => o.PlanId == FreePlan.Id);
+            var organizations = (await _organizationRepository.GetByIdsAsync(user.OrganizationIds.ToArray()).AnyContext()).Where(o => o.PlanId == FreePlan.Id);
             return !organizations.Any();
         }
 
@@ -70,9 +70,9 @@ namespace Exceptionless.Core.Billing {
                 return ChangePlanResult.FailWithMessage($"Please remove {projectCount - maxProjects} project{((projectCount - maxProjects) > 0 ? "s" : String.Empty)} and try again.");
 
             // Ensure the user can't be apart of more than one free plan.
-            if (String.Equals(plan.Id, FreePlan.Id) && user != null && (await _organizationRepository.GetByIdsAsync(user.OrganizationIds).AnyContext()).Any(o => String.Equals(o.PlanId, FreePlan.Id)))
+            if (String.Equals(plan.Id, FreePlan.Id) && user != null && (await _organizationRepository.GetByIdsAsync(user.OrganizationIds.ToArray()).AnyContext()).Any(o => String.Equals(o.PlanId, FreePlan.Id)))
                 return ChangePlanResult.FailWithMessage("You already have one free account. You are not allowed to create more than one free account.");
-            
+
             return new ChangePlanResult { Success = true };
         }
 
@@ -81,7 +81,7 @@ namespace Exceptionless.Core.Billing {
         }
 
         public static BillingPlan GetBillingPlanByUpsellingRetentionPeriod(int retentionDays) {
-            return Plans.Where(p => p.RetentionDays > retentionDays).OrderBy(p => p.RetentionDays).ThenBy(p => p.Price).FirstOrDefault();
+            return Plans.Where(p => p.RetentionDays > retentionDays && p.Price > 0).OrderBy(p => p.RetentionDays).ThenBy(p => p.Price).FirstOrDefault();
         }
 
         public static void ApplyBillingPlan(Organization organization, BillingPlan plan, User user = null, bool updateBillingPrice = true) {

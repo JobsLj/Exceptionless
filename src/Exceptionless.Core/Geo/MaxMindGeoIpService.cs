@@ -15,40 +15,37 @@ namespace Exceptionless.Core.Geo {
     public class MaxMindGeoIpService : IGeoIpService, IDisposable {
         internal const string GEO_IP_DATABASE_PATH = "GeoLite2-City.mmdb";
 
-        private readonly InMemoryCacheClient _localCache = new InMemoryCacheClient { MaxItems = 250 };
+        private readonly InMemoryCacheClient _localCache;
         private readonly IFileStorage _storage;
         private readonly ILogger _logger;
         private DatabaseReader _database;
         private DateTime? _databaseLastChecked;
-        
 
-        public MaxMindGeoIpService(IFileStorage storage, ILogger<MaxMindGeoIpService> logger) {
+        public MaxMindGeoIpService(IFileStorage storage, ILoggerFactory loggerFactory) {
             _storage = storage;
-            _logger = logger;
+            _localCache = new InMemoryCacheClient(new InMemoryCacheClientOptions { LoggerFactory = loggerFactory }) { MaxItems = 250 };
+            _logger = loggerFactory.CreateLogger<MaxMindGeoIpService>();
         }
 
         public async Task<GeoResult> ResolveIpAsync(string ip, CancellationToken cancellationToken = new CancellationToken()) {
-            if (String.IsNullOrWhiteSpace(ip) || (!ip.Contains(".") && !ip.Contains(":")))
+            if (String.IsNullOrEmpty(ip) || (!ip.Contains(".") && !ip.Contains(":")))
                 return null;
 
             ip = ip.Trim();
+            if (ip.IsPrivateNetwork())
+                return null;
 
             var cacheValue = await _localCache.GetAsync<GeoResult>(ip).AnyContext();
             if (cacheValue.HasValue)
                 return cacheValue.Value;
 
             GeoResult result = null;
-
-            if (ip.IsPrivateNetwork())
-                return null;
-
             var database = await GetDatabaseAsync(cancellationToken).AnyContext();
             if (database == null)
                 return null;
 
             try {
-                CityResponse city;
-                if (database.TryCity(ip, out city) && city?.Location != null) {
+                if (database.TryCity(ip, out CityResponse city) && city?.Location != null) {
                     result = new GeoResult {
                         Latitude = city.Location.Latitude,
                         Longitude = city.Location.Longitude,
@@ -73,8 +70,8 @@ namespace Exceptionless.Core.Geo {
         }
 
         private async Task<DatabaseReader> GetDatabaseAsync(CancellationToken cancellationToken) {
-            // Try to load the new database from disk if the current one is an hour old.
-            if (_database != null && _databaseLastChecked.HasValue && _databaseLastChecked.Value < SystemClock.UtcNow.SubtractHours(1)) {
+            // Try to load the new database from disk if the current one is a day old.
+            if (_database != null && _databaseLastChecked.HasValue && _databaseLastChecked.Value < SystemClock.UtcNow.SubtractDays(1)) {
                 _database.Dispose();
                 _database = null;
             }
@@ -102,7 +99,7 @@ namespace Exceptionless.Core.Geo {
 
             return _database;
         }
-        
+
         public void Dispose() {
             if (_database == null)
                 return;

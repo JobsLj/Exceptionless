@@ -13,9 +13,10 @@ using Newtonsoft.Json.Linq;
 
 namespace Exceptionless.Serializer {
     public class DataObjectConverter<T> : CustomCreationConverter<T> where T : IData, new() {
+        private static readonly Type _type = typeof(T);
+        private static readonly IDictionary<string, IMemberAccessor> _propertyAccessors = new Dictionary<string, IMemberAccessor>(StringComparer.OrdinalIgnoreCase);
         private readonly IDictionary<string, Type> _dataTypeRegistry = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
         private readonly ILogger _logger;
-        private static IDictionary<string, IMemberAccessor> _propertyAccessors = new Dictionary<string, IMemberAccessor>(StringComparer.OrdinalIgnoreCase);
         private readonly char[] _filteredChars = { '.', '-', '_' };
 
         public DataObjectConverter(ILogger logger, IEnumerable<KeyValuePair<string, Type>> knownDataTypes = null) {
@@ -27,7 +28,7 @@ namespace Exceptionless.Serializer {
             if (_propertyAccessors.Count != 0)
                 return;
 
-            foreach (var prop in typeof(T).GetProperties(BindingFlags.Instance | BindingFlags.FlattenHierarchy | BindingFlags.Public).Where(p => p.CanWrite))
+            foreach (var prop in _type.GetProperties(BindingFlags.Instance | BindingFlags.FlattenHierarchy | BindingFlags.Public).Where(p => p.CanWrite))
                 _propertyAccessors.Add(prop.Name, LateBinder.GetPropertyAccessor(prop));
         }
 
@@ -49,8 +50,7 @@ namespace Exceptionless.Serializer {
                     continue;
                 }
 
-                IMemberAccessor value;
-                var accessor = _propertyAccessors.TryGetValue(propertyName, out value) ? value : null;
+                var accessor = _propertyAccessors.TryGetValue(propertyName, out IMemberAccessor value) ? value : null;
                 if (accessor != null) {
                     if (p.Value.Type == JTokenType.None || p.Value.Type == JTokenType.Undefined)
                         continue;
@@ -86,11 +86,10 @@ namespace Exceptionless.Serializer {
                 target.Data = new DataDictionary();
 
             string dataKey = GetDataKey(target.Data, p.Name);
-            String unknownTypeDataKey = GetDataKey(target.Data, p.Name, true);
+            string unknownTypeDataKey = GetDataKey(target.Data, p.Name, true);
 
             // when adding items to data, see if they are a known type and deserialize to the registered type
-            Type dataType;
-            if (_dataTypeRegistry.TryGetValue(p.Name, out dataType)) {
+            if (_dataTypeRegistry.TryGetValue(p.Name, out Type dataType)) {
                 try {
                     if (p.Value is JValue && p.Value.Type == JTokenType.String) {
                         string value = p.Value.ToString();
@@ -114,20 +113,18 @@ namespace Exceptionless.Serializer {
             } else if (p.Value is JArray) {
                 target.Data[dataType == null || dataType == typeof(JArray) ? dataKey : unknownTypeDataKey] = p.Value.ToObject<JArray>();
             } else if (p.Value is JValue && p.Value.Type != JTokenType.String) {
-                var value = ((JValue)p.Value).Value;
+                object value = ((JValue)p.Value).Value;
                 target.Data[dataType == null || dataType == value.GetType() ? dataKey : unknownTypeDataKey] = value;
             } else {
                 string value = p.Value.ToString();
                 var jsonType = value.GetJsonType();
                 if (jsonType == JsonType.Object) {
-                    JObject obj;
-                    if (value.TryFromJson(out obj))
+                    if (value.TryFromJson(out JObject obj))
                         target.Data[dataType == null || dataType == obj.GetType() ? dataKey : unknownTypeDataKey] = obj;
                     else
                         target.Data[dataType == null || dataType == value.GetType() ? dataKey : unknownTypeDataKey] = value;
                 } else if (jsonType == JsonType.Array) {
-                    JArray obj;
-                    if (value.TryFromJson(out obj))
+                    if (value.TryFromJson(out JArray obj))
                         target.Data[dataType == null || dataType == obj.GetType() ? dataKey : unknownTypeDataKey] = obj;
                     else
                         target.Data[dataType == null || dataType == value.GetType() ? dataKey : unknownTypeDataKey] = value;
@@ -158,7 +155,7 @@ namespace Exceptionless.Serializer {
         public override bool CanWrite => false;
 
         public override bool CanConvert(Type objectType) {
-            return objectType == typeof(T);
+            return objectType == _type;
         }
     }
 }

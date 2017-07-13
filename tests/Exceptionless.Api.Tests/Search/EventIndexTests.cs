@@ -1,23 +1,26 @@
 ﻿using System;
 using System.IO;
 using System.Threading.Tasks;
-using Exceptionless.Core.Filter;
+using Exceptionless.Core.Queries.Validation;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Plugins.EventParser;
 using Exceptionless.Core.Repositories;
-using Foundatio.Logging;
 using Foundatio.Repositories.Models;
 using Foundatio.Utility;
+using Nest;
 using Xunit;
 using Xunit.Abstractions;
+using LogLevel = Foundatio.Logging.LogLevel;
 
 namespace Exceptionless.Api.Tests.Repositories {
     public sealed class EventIndexTests : ElasticTestBase {
         private readonly IEventRepository _repository;
+        private readonly PersistentEventQueryValidator _validator;
 
         public EventIndexTests(ITestOutputHelper output) : base(output) {
-            SystemClock.UtcNowFunc = () => new DateTime(2015, 2, 13, 0, 0, 0, DateTimeKind.Utc);
+            SystemClock.Test.SetFixedTime(new DateTime(2015, 2, 13, 0, 0, 0, DateTimeKind.Utc));
             _repository = GetService<IEventRepository>();
+            _validator = GetService<PersistentEventQueryValidator>();
             CreateEventsAsync().GetAwaiter().GetResult();
         }
 
@@ -67,7 +70,7 @@ namespace Exceptionless.Api.Tests.Repositories {
             Assert.NotNull(result);
             Assert.Equal(count, result.Total);
         }
-        
+
         [Theory]
         [InlineData("log", 1)]
         [InlineData("error", 2)]
@@ -118,7 +121,7 @@ namespace Exceptionless.Api.Tests.Repositories {
         [InlineData(false, 2)]
         [InlineData(true, 1)]
         public async Task GetByFirstAsync(bool first, int count) {
-            var result = await GetByFilterAsync("first:" + first.ToString().ToLower());
+            var result = await GetByFilterAsync("first:" + first.ToString().ToLowerInvariant());
             Assert.NotNull(result);
             Assert.Equal(count, result.Total);
         }
@@ -160,7 +163,7 @@ namespace Exceptionless.Api.Tests.Repositories {
         [InlineData(false, 2)]
         [InlineData(true, 1)]
         public async Task GetByFixedAsync(bool @fixed, int count) {
-            var result = await GetByFilterAsync("fixed:" + @fixed.ToString().ToLower());
+            var result = await GetByFilterAsync("fixed:" + @fixed.ToString().ToLowerInvariant());
             Assert.NotNull(result);
             Assert.Equal(count, result.Total);
         }
@@ -169,7 +172,7 @@ namespace Exceptionless.Api.Tests.Repositories {
         [InlineData(false, 2)]
         [InlineData(true, 1)]
         public async Task GetByHiddenAsync(bool hidden, int count) {
-            var result = await GetByFilterAsync("hidden:" + hidden.ToString().ToLower());
+            var result = await GetByFilterAsync("hidden:" + hidden.ToString().ToLowerInvariant());
             Assert.NotNull(result);
             Assert.Equal(count, result.Total);
         }
@@ -207,6 +210,10 @@ namespace Exceptionless.Api.Tests.Repositories {
         }
 
         [Theory]
+        [InlineData("\"2001:0:4137:9e76:cfd:33a0:5198:3a66\"", 1)]
+        [InlineData("ip:\"2001:0:4137:9e76:cfd:33a0:5198:3a66\"", 1)]
+        [InlineData("192.168.0.243", 1)]
+        [InlineData("ip:192.168.0.243", 1)]
         [InlineData("192.168.0.88", 1)]
         [InlineData("ip:192.168.0.88", 1)]
         [InlineData("10.0.0.208", 1)]
@@ -249,7 +256,6 @@ namespace Exceptionless.Api.Tests.Repositories {
         [Theory]
         [InlineData("browser:Chrome", 2)]
         [InlineData("browser:\"Chrome Mobile\"", 1)]
-        [InlineData("browser.raw:\"Chrome Mobile\"", 1)]
         public async Task GetByBrowserAsync(string filter, int count) {
             var result = await GetByFilterAsync(filter);
             Assert.NotNull(result);
@@ -259,7 +265,7 @@ namespace Exceptionless.Api.Tests.Repositories {
         [Theory]
         [InlineData("browser.version:39.0.2171", 1)]
         [InlineData("browser.version:26.0.1410", 1)]
-        [InlineData("browser.version.raw:26.0.1410", 1)]
+        [InlineData("browser.version:\"26.0.1410\"", 1)]
         public async Task GetByBrowserVersionAsync(string filter, int count) {
             var result = await GetByFilterAsync(filter);
             Assert.NotNull(result);
@@ -278,7 +284,6 @@ namespace Exceptionless.Api.Tests.Repositories {
         [Theory]
         [InlineData("device:Huawei", 1)]
         [InlineData("device:\"Huawei U8686\"", 1)]
-        [InlineData("device.raw:\"Huawei U8686\"", 1)]
         public async Task GetByDeviceAsync(string filter, int count) {
             var result = await GetByFilterAsync(filter);
             Assert.NotNull(result);
@@ -289,7 +294,6 @@ namespace Exceptionless.Api.Tests.Repositories {
         [InlineData("os:Android", 1)]
         [InlineData("os:Mac", 1)]
         [InlineData("os:\"Mac OS X\"", 1)]
-        [InlineData("os.raw:\"Mac OS X\"", 1)]
         [InlineData("os:\"Microsoft Windows Server\"", 1)]
         [InlineData("os:\"Microsoft Windows Server 2012 R2 Standard\"", 1)]
         public async Task GetByOSAsync(string filter, int count) {
@@ -301,8 +305,8 @@ namespace Exceptionless.Api.Tests.Repositories {
         [Theory]
         [InlineData("os.version:4.1.1", 1)]
         [InlineData("os.version:10.10.1", 1)]
-        [InlineData("os.version.raw:10.10", 0)]
-        [InlineData("os.version.raw:10.10.1", 1)]
+        [InlineData("os.version:\"10.10\"", 0)]
+        [InlineData("os.version:\"10.10.1\"", 1)]
         public async Task GetByOSVersionAsync(string filter, int count) {
             var result = await GetByFilterAsync(filter);
             Assert.NotNull(result);
@@ -351,7 +355,14 @@ namespace Exceptionless.Api.Tests.Repositories {
 
         [Theory]
         [InlineData("AssociateWithCurrentThread", 1)]
+        [InlineData("System.Web.ThreadContext.AssociateWithCurrentThread", 1)]
+        [InlineData("error.targetmethod:System", 1)]
+        [InlineData("error.targetmethod:System.Web", 1)]
+        [InlineData("error.targetmethod:System.Web.ThreadContext", 1)]
+        [InlineData("error.targetmethod:ThreadContext", 1)]
         [InlineData("error.targetmethod:AssociateWithCurrentThread", 1)]
+        [InlineData("error.targetmethod:System.Web.ThreadContext.AssociateWithCurrentThread", 1)]
+        [InlineData("error.targetmethod:\"System.Web.ThreadContext.AssociateWithCurrentThread()\"", 1)]
         public async Task GetByErrorTargetMethodAsync(string filter, int count) {
             var result = await GetByFilterAsync(filter);
             Assert.NotNull(result);
@@ -361,7 +372,7 @@ namespace Exceptionless.Api.Tests.Repositories {
         [Theory]
         [InlineData("Exception", 2)]
         [InlineData("error.targettype:Exception", 1)]
-        [InlineData("error.targettype.raw:System.Exception", 1)]
+        [InlineData("error.targettype:\"System.Exception\"", 1)]
         public async Task GetByErrorTargetTypeAsync(string filter, int count) {
             var result = await GetByFilterAsync(filter);
             Assert.NotNull(result);
@@ -432,14 +443,14 @@ namespace Exceptionless.Api.Tests.Repositories {
             Assert.NotNull(result);
             Assert.Equal(count, result.Total);
         }
-        
+
         private async Task CreateEventsAsync() {
             var parserPluginManager = GetService<EventParserPluginManager>();
-            foreach (var file in Directory.GetFiles(@"..\..\Search\Data\", "event*.json", SearchOption.AllDirectories)) {
+            foreach (string file in Directory.GetFiles(@"..\..\Search\Data\", "event*.json", SearchOption.AllDirectories)) {
                 if (file.EndsWith("summary.json"))
                     continue;
 
-                var events = parserPluginManager.ParseEvents(File.ReadAllText(file), 2, "exceptionless/2.0.0.0");
+                var events = await parserPluginManager.ParseEventsAsync(File.ReadAllText(file), 2, "exceptionless/2.0.0.0");
                 Assert.NotNull(events);
                 Assert.True(events.Count > 0);
                 foreach (var ev in events)
@@ -448,16 +459,14 @@ namespace Exceptionless.Api.Tests.Repositories {
                 await _repository.AddAsync(events);
             }
 
-            await _configuration.Client.RefreshAsync();
+            await _configuration.Client.RefreshAsync(Indices.All);
         }
 
-        private Task<FindResults<PersistentEvent>> GetByFilterAsync(string filter) {
-            var result = QueryProcessor.Process(filter);
-            filter = result.ExpandedQuery;
-            _logger.Info($"Expanded Filter: {filter}");
-
+        private async Task<FindResults<PersistentEvent>> GetByFilterAsync(string filter) {
+            var result = await _validator.ValidateQueryAsync(filter);
+            Assert.True(result.IsValid);
             Log.SetLogLevel<EventRepository>(LogLevel.Trace);
-            return _repository.GetByFilterAsync(null, filter, new SortingOptions(), null, DateTime.MinValue, DateTime.MaxValue, new PagingOptions());
+            return await _repository.GetByFilterAsync(null, filter, null, null, DateTime.MinValue, DateTime.MaxValue);
         }
     }
 }

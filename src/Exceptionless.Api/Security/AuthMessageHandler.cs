@@ -8,6 +8,7 @@ using Exceptionless.Api.Extensions;
 using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Repositories;
 using Exceptionless.Core.Models;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 
 namespace Exceptionless.Api.Security {
@@ -30,16 +31,16 @@ namespace Exceptionless.Api.Security {
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
             var authHeader = request.Headers.Authorization;
-            string scheme = authHeader?.Scheme.ToLower();
+            string scheme = authHeader?.Scheme.ToLowerInvariant();
             string token = null;
             if (authHeader != null && (scheme == BearerScheme || scheme == TokenScheme)) {
                 token = authHeader.Parameter;
             } else if (authHeader != null && scheme == BasicScheme) {
                 var authInfo = request.GetBasicAuth();
                 if (authInfo != null) {
-                    if (authInfo.Username.ToLower() == "client")
+                    if (authInfo.Username.ToLowerInvariant() == "client")
                         token = authInfo.Password;
-                    else if (authInfo.Password.ToLower() == "x-oauth-basic" || String.IsNullOrEmpty(authInfo.Password))
+                    else if (authInfo.Password.ToLowerInvariant() == "x-oauth-basic" || String.IsNullOrEmpty(authInfo.Password))
                         token = authInfo.Username;
                     else {
                         User user;
@@ -75,7 +76,7 @@ namespace Exceptionless.Api.Security {
             if (String.IsNullOrEmpty(token))
                 return await BaseSendAsync(request, cancellationToken);
 
-            var tokenRecord = await _tokenRepository.GetByIdAsync(token, true);
+            var tokenRecord = await _tokenRepository.GetByIdAsync(token, o => o.Cache());
             if (tokenRecord == null)
                 return new HttpResponseMessage(HttpStatusCode.Unauthorized);
 
@@ -83,11 +84,11 @@ namespace Exceptionless.Api.Security {
                 return new HttpResponseMessage(HttpStatusCode.Unauthorized);
 
             if (!String.IsNullOrEmpty(tokenRecord.UserId)) {
-                var user = await _userRepository.GetByIdAsync(tokenRecord.UserId, true);
+                var user = await _userRepository.GetByIdAsync(tokenRecord.UserId, o => o.Cache());
                 if (user == null)
                     return new HttpResponseMessage(HttpStatusCode.Unauthorized);
 
-                SetupUserRequest(request, user);
+                SetupUserRequest(request, user, tokenRecord);
             } else {
                 SetupTokenRequest(request, tokenRecord);
             }
@@ -95,8 +96,8 @@ namespace Exceptionless.Api.Security {
             return await BaseSendAsync(request, cancellationToken);
         }
 
-        private void SetupUserRequest(HttpRequestMessage request, User user) {
-            request.GetRequestContext().Principal = new ClaimsPrincipal(user.ToIdentity());
+        private void SetupUserRequest(HttpRequestMessage request, User user, Token token = null) {
+            request.GetRequestContext().Principal = new ClaimsPrincipal(user.ToIdentity(token));
             request.SetUser(user);
         }
 

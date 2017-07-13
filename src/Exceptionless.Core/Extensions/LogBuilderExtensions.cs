@@ -35,6 +35,14 @@ namespace Foundatio.Logging {
             return builder.Property(Tags, tagList);
         }
 
+        public static ILogBuilder Value(this ILogBuilder builder, decimal value) {
+            return builder.Property("@value", value);
+        }
+
+        public static ILogBuilder ManualStackingKey(this ILogBuilder builder, string stackingKey) {
+            return builder.Property("@stack", stackingKey);
+        }
+
         /// <summary>
         /// Sets the user's identity (ie. email address, username, user id) that the event happened to.
         /// </summary>
@@ -64,7 +72,7 @@ namespace Foundatio.Logging {
 
             return builder;
         }
-        
+
         /// <summary>
         /// Marks the event as being a unhandled occurrence and sets the submission method.
         /// </summary>
@@ -74,7 +82,7 @@ namespace Foundatio.Logging {
             var contextData = builder.GetContextData();
             if (contextData == null)
                 return builder;
-            
+
             contextData.MarkAsUnhandledError();
             if (!String.IsNullOrEmpty(submissionMethod))
                 contextData.SetSubmissionMethod(submissionMethod);
@@ -102,7 +110,7 @@ namespace Foundatio.Logging {
 
             if (builder.LogData.Properties == null)
                 builder.LogData.Properties = new Dictionary<string, object>();
-            
+
             IDictionary<string, object> contextData = new Dictionary<string, object>();
             if (!builder.LogData.Properties.ContainsKey(ContextData))
                 builder.LogData.Properties[ContextData] = contextData;

@@ -11,10 +11,11 @@ using Foundatio.Caching;
 using Foundatio.Jobs;
 using Foundatio.Lock;
 using Foundatio.Logging;
-using Foundatio.Repositories.Elasticsearch.Models;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 
 namespace Exceptionless.Core.Jobs {
+    [Job(Description = "Closes inactive user sessions.", InitialDelay = "30s", Interval = "30s")]
     public class CloseInactiveSessionsJob : JobWithLockBase {
         private readonly IEventRepository _eventRepository;
         private readonly ICacheClient _cache;
@@ -31,7 +32,7 @@ namespace Exceptionless.Core.Jobs {
         }
 
         protected override async Task<JobResult> RunInternalAsync(JobContext context) {
-            var results = await _eventRepository.GetOpenSessionsAsync(SystemClock.UtcNow.SubtractMinutes(1), new ElasticPagingOptions().UseSnapshotPaging().WithLimit(100)).AnyContext();
+            var results = await _eventRepository.GetOpenSessionsAsync(SystemClock.UtcNow.SubtractMinutes(1), o => o.SnapshotPaging().PageLimit(100)).AnyContext();
             while (results.Documents.Count > 0 && !context.CancellationToken.IsCancellationRequested) {
                 var inactivePeriodUtc = SystemClock.UtcNow.Subtract(DefaultInactivePeriod);
                 var sessionsToUpdate = new List<PersistentEvent>(results.Documents.Count);
@@ -100,7 +101,7 @@ namespace Exceptionless.Core.Jobs {
         private async Task<HeartbeatResult> GetLastHeartbeatActivityUtcAsync(string cacheKey) {
             var cacheValue = await _cache.GetAsync<DateTime>(cacheKey).AnyContext();
             if (cacheValue.HasValue) {
-                var close = await _cache.GetAsync(cacheKey + "-close", false).AnyContext();
+                bool close = await _cache.GetAsync(cacheKey + "-close", false).AnyContext();
                 return new HeartbeatResult { ActivityUtc =  cacheValue.Value, Close = close, CacheKey = cacheKey };
             }
 

@@ -16,8 +16,8 @@ _In appreciation for anyone who submits a non-trivial pull request, we will give
 
 1. Please read the [contributing document](https://github.com/exceptionless/Exceptionless/blob/master/CONTRIBUTING.md).
 2. Please follow the steps below to start configuring your Exceptionless development environment.
-  1. You will need to have [Visual Studio 2015](http://www.visualstudio.com/products/visual-studio-community-vs) installed.
-  2. Start `Elasticsearch` by running `StartBackendServers.bat`. *Please ensure that [dynamic scripting is enabled in the elasticsearch.yml file](https://github.com/exceptionless/Exceptionless/blob/master/build/elasticsearch.yml#L3).*
+  1. You will need to have [Visual Studio 2017](http://www.visualstudio.com/products/visual-studio-community-vs) installed.
+  2. Start `Elasticsearch` by running `StartBackendServers.bat`.
   3. Open the `Exceptionless.sln` Visual Studio solution file.
   4. Select `Exceptionless.Api` as startup projects.
   5. Run the project by pressing `F5` to start the server.
@@ -25,7 +25,7 @@ _In appreciation for anyone who submits a non-trivial pull request, we will give
 
 Alternatively, you can [watch this short YouTube video](http://youtu.be/wROzlVuBoDs) showing how to get started with the project.
 
-##Thanks
+## Thanks
 Thanks to the community for your support!
 
 Thanks to [JetBrains](http://jetbrains.com) for a community [WebStorm](https://www.jetbrains.com/webstorm/) and [ReSharper](https://www.jetbrains.com/resharper/) license to use on this project. It's the best JavaScript IDE/Visual Studio productivity enhancement hands down.

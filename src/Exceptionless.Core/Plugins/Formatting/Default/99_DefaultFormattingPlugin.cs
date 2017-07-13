@@ -2,20 +2,11 @@
 using System.Collections.Generic;
 using Exceptionless.Core.Pipeline;
 using Exceptionless.Core.Extensions;
-using Exceptionless.Core.Mail.Models;
 using Exceptionless.Core.Models;
-using Exceptionless.Core.Queues.Models;
-using RazorSharpEmail;
 
 namespace Exceptionless.Core.Plugins.Formatting {
     [Priority(99)]
     public sealed class DefaultFormattingPlugin : FormattingPluginBase {
-        private readonly IEmailGenerator _emailGenerator;
-
-        public DefaultFormattingPlugin(IEmailGenerator emailGenerator) {
-            _emailGenerator = emailGenerator;
-        }
-
         public override string GetStackTitle(PersistentEvent ev) {
             if (String.IsNullOrWhiteSpace(ev.Message) && ev.IsError())
                 return "Unknown Error";
@@ -26,8 +17,7 @@ namespace Exceptionless.Core.Plugins.Formatting {
         public override SummaryData GetStackSummaryData(Stack stack) {
             var data = new Dictionary<string, object> { { "Type", stack.Type } };
 
-            string value;
-            if (stack.SignatureInfo.TryGetValue("Source", out value))
+            if (stack.SignatureInfo.TryGetValue("Source", out string value))
                 data.Add("Source", value);
 
             return new SummaryData { TemplateKey = "stack-summary", Data = data };
@@ -45,34 +35,61 @@ namespace Exceptionless.Core.Plugins.Formatting {
             return new SummaryData { TemplateKey = "event-summary", Data = data };
         }
 
-        public override MailMessage GetEventNotificationMailMessage(EventNotification model) {
-            string messageOrSource = !String.IsNullOrEmpty(model.Event.Message) ? model.Event.Message : model.Event.Source;
+        public override MailMessageData GetEventNotificationMailMessageData(PersistentEvent ev, bool isCritical, bool isNew, bool isRegression) {
+            string messageOrSource = !String.IsNullOrEmpty(ev.Message) ? ev.Message : ev.Source;
             if (String.IsNullOrEmpty(messageOrSource))
                 return null;
 
             string notificationType = "Occurrence event";
-            if (model.IsNew)
+            if (isNew)
                 notificationType = "New event";
-            else if (model.IsRegression)
+            else if (isRegression)
                 notificationType = "Regression event";
 
-            if (model.IsCritical)
-                notificationType = String.Concat("Critical ", notificationType.ToLower());
+            if (isCritical)
+                notificationType = String.Concat("Critical ", notificationType.ToLowerInvariant());
 
-            var requestInfo = model.Event.GetRequestInfo();
-            var mailerModel = new EventNotificationModel(model) {
-                BaseUrl = Settings.Current.BaseURL,
-                Subject = String.Concat(notificationType, ": ", messageOrSource.Truncate(120)),
-                Message = model.Event.Message,
-                Source = model.Event.Source,
-                Url = requestInfo?.GetFullPath(true, true, true)
-            };
+            string subject = String.Concat(notificationType, ": ", messageOrSource).Truncate(120);
+            var data = new Dictionary<string, object>();
+            if (!String.IsNullOrEmpty(ev.Message))
+                data.Add("Message", ev.Message.Truncate(60));
 
-            return _emailGenerator.GenerateMessage(mailerModel, "Notice").ToMailMessage();
+            if (!String.IsNullOrEmpty(ev.Source))
+                data.Add("Source", ev.Source.Truncate(60));
+
+            var requestInfo = ev.GetRequestInfo();
+            if (requestInfo != null)
+                data.Add("Url", requestInfo.GetFullPath(true, true, true));
+
+            return new MailMessageData { Subject = subject, Data = data };
         }
 
-        public override string GetEventViewName(PersistentEvent ev) {
-            return "Event";
+        public override SlackMessage GetSlackEventNotification(PersistentEvent ev, Project project, bool isCritical, bool isNew, bool isRegression) {
+            string messageOrSource = !String.IsNullOrEmpty(ev.Message) ? ev.Message : ev.Source;
+            if (String.IsNullOrEmpty(messageOrSource))
+                return null;
+
+            string notificationType = "Occurrence event";
+            if (isNew)
+                notificationType = "New event";
+            else if (isRegression)
+                notificationType = "Regression event";
+
+            if (isCritical)
+                notificationType = String.Concat("Critical ", notificationType.ToLowerInvariant());
+
+            var attachment = new SlackMessage.SlackAttachment(ev);
+            if (!String.IsNullOrEmpty(ev.Message))
+                attachment.Fields.Add(new SlackMessage.SlackAttachmentFields { Title = "Message", Value = ev.Message.Truncate(60) });
+
+            if (!String.IsNullOrEmpty(ev.Source))
+                attachment.Fields.Add(new SlackMessage.SlackAttachmentFields { Title = "Source", Value = ev.Source.Truncate(60) });
+
+            AddDefaultSlackFields(ev, attachment.Fields);
+            string subject = $"[{project.Name}] A {notificationType}: *{GetSlackEventUrl(ev.Id, messageOrSource.Truncate(120))}*";
+            return new SlackMessage(subject) {
+                Attachments = new List<SlackMessage.SlackAttachment> { attachment }
+            };
         }
     }
 }

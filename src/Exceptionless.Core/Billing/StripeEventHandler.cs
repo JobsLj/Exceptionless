@@ -5,6 +5,7 @@ using Exceptionless.Core.Mail;
 using Exceptionless.Core.Repositories;
 using Exceptionless.Core.Models;
 using Foundatio.Logging;
+using Foundatio.Repositories;
 using Foundatio.Utility;
 using Stripe;
 
@@ -45,7 +46,7 @@ namespace Exceptionless.Core.Billing {
                     break;
                 }
                 default: {
-                        _logger.Trace("Unhandled stripe webhook called. Type: {0} Id: {1} UserId: {2}", stripeEvent.Type, stripeEvent.Id, stripeEvent.UserId);
+                        _logger.Trace("Unhandled stripe webhook called. Type: {0} Id: {1} Account: {2}", stripeEvent.Type, stripeEvent.Id, stripeEvent.Account);
                     break;
                 }
             }
@@ -99,7 +100,7 @@ namespace Exceptionless.Core.Billing {
                 org.RemoveSuspension();
             }
 
-            await _organizationRepository.SaveAsync(org, true).AnyContext();
+            await _organizationRepository.SaveAsync(org, o => o.Cache()).AnyContext();
         }
 
         private async Task SubscriptionDeletedAsync(StripeSubscription sub) {
@@ -119,7 +120,7 @@ namespace Exceptionless.Core.Billing {
             org.SuspendedByUserId = "Stripe";
 
             org.BillingChangeDate = SystemClock.UtcNow;
-            await _organizationRepository.SaveAsync(org, true).AnyContext();
+            await _organizationRepository.SaveAsync(org, o => o.Cache()).AnyContext();
         }
 
         private async Task InvoicePaymentSucceededAsync(StripeInvoice inv) {
@@ -152,7 +153,7 @@ namespace Exceptionless.Core.Billing {
             }
 
             _logger.Info("Stripe payment failed. Customer: {0} Org: {1} Org Name: {2} Email: {3}", inv.CustomerId, org.Id, org.Name, user.EmailAddress);
-            await _mailer.SendPaymentFailedAsync(user, org).AnyContext();
+            await _mailer.SendOrganizationPaymentFailedAsync(user, org).AnyContext();
         }
     }
 }

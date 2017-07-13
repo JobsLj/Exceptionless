@@ -1,13 +1,12 @@
 ﻿using System;
 using Exceptionless.Core.Models;
-using Exceptionless.Core.Queues.Models;
 
 namespace Exceptionless.Core.Plugins.Formatting {
-    public interface IFormattingPlugin {
+    public interface IFormattingPlugin : IPlugin {
         string GetStackTitle(PersistentEvent ev);
-        string GetEventViewName(PersistentEvent ev);
         SummaryData GetStackSummaryData(Stack stack);
         SummaryData GetEventSummaryData(PersistentEvent ev);
-        MailMessage GetEventNotificationMailMessage(EventNotification model);
+        MailMessageData GetEventNotificationMailMessageData(PersistentEvent ev, bool isCritical, bool isNew, bool isRegression);
+        SlackMessage GetSlackEventNotification(PersistentEvent ev, Project project, bool isCritical, bool isNew, bool isRegression);
     }
 }

@@ -11,18 +11,18 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
     [Priority(20)]
     public sealed class ErrorPlugin : EventProcessorPluginBase {
         public ErrorPlugin(ILoggerFactory loggerFactory = null) : base(loggerFactory) {}
-        
+
         public override Task EventProcessingAsync(EventContext context) {
             if (!context.Event.IsError())
                 return Task.CompletedTask;
 
-            Error error = context.Event.GetError();
+            var error = context.Event.GetError();
             if (error == null)
                 return Task.CompletedTask;
 
             if (String.IsNullOrWhiteSpace(context.Event.Message))
                 context.Event.Message = error.Message;
-            
+
             if (context.StackSignatureData.Count > 0)
                 return Task.CompletedTask;
 
@@ -40,11 +40,11 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
 
             var targetInfo = new SettingsDictionary(signature.SignatureInfo);
             var stackingTarget = error.GetStackingTarget();
-            if (stackingTarget?.Error?.StackTrace != null && stackingTarget.Error.StackTrace.Count > 0 && !targetInfo.ContainsKey("Message"))
+            if (stackingTarget?.Error?.StackTrace?.Count > 0 && !targetInfo.ContainsKey("Message"))
                 targetInfo["Message"] = stackingTarget.Error.Message;
 
             error.Data[Error.KnownDataKeys.TargetInfo] = targetInfo;
-            
+
             foreach (var key in signature.SignatureInfo.Keys)
                 context.StackSignatureData.Add(key, signature.SignatureInfo[key]);
 

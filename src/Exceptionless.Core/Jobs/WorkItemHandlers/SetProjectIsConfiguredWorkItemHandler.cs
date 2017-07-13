@@ -9,6 +9,7 @@ using Foundatio.Jobs;
 using Foundatio.Lock;
 using Foundatio.Logging;
 using Foundatio.Messaging;
+using Foundatio.Repositories;
 
 namespace Exceptionless.Core.Jobs.WorkItemHandlers {
     public class SetProjectIsConfiguredWorkItemHandler : WorkItemHandlerBase {
@@ -23,20 +24,20 @@ namespace Exceptionless.Core.Jobs.WorkItemHandlers {
         }
 
         public override Task<ILock> GetWorkItemLockAsync(object workItem, CancellationToken cancellationToken = new CancellationToken()) {
-            var cacheKey = $"{nameof(SetProjectIsConfiguredWorkItemHandler)}:{((SetProjectIsConfiguredWorkItem)workItem).ProjectId}";
+            string cacheKey = $"{nameof(SetProjectIsConfiguredWorkItemHandler)}:{((SetProjectIsConfiguredWorkItem)workItem).ProjectId}";
             return _lockProvider.AcquireAsync(cacheKey, TimeSpan.FromMinutes(15), new CancellationToken(true));
         }
 
         public override async Task HandleItemAsync(WorkItemContext context) {
             var workItem = context.GetData<SetProjectIsConfiguredWorkItem>();
             Log.Info("Setting Is Configured for project: {0}", workItem.ProjectId);
-            
+
             var project = await _projectRepository.GetByIdAsync(workItem.ProjectId).AnyContext();
             if (project == null || project.IsConfigured.GetValueOrDefault())
                 return;
 
-            project.IsConfigured = workItem.IsConfigured || await _eventRepository.GetCountByProjectIdAsync(project.Id).AnyContext() > 0;
-            await _projectRepository.SaveAsync(project, true).AnyContext();
+            project.IsConfigured = workItem.IsConfigured || await _eventRepository.GetCountByProjectIdAsync(project.Id, true).AnyContext() > 0;
+            await _projectRepository.SaveAsync(project, o => o.Cache()).AnyContext();
         }
     }
 }

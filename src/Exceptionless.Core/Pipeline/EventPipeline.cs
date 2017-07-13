@@ -13,17 +13,16 @@ using Exceptionless.Core.Queues.Models;
 using Exceptionless.Core.Repositories.Base;
 using Foundatio.Logging;
 using Foundatio.Metrics;
+using Foundatio.Repositories;
 
 namespace Exceptionless.Core.Pipeline {
     public class EventPipeline : PipelineBase<EventContext, EventPipelineActionBase> {
         private readonly IOrganizationRepository _organizationRepository;
         private readonly IProjectRepository _projectRepository;
-        private readonly IMetricsClient _metricsClient;
 
-        public EventPipeline(IDependencyResolver dependencyResolver, IOrganizationRepository organizationRepository, IProjectRepository projectRepository, IMetricsClient metricsClient, ILoggerFactory loggerFactory = null) : base(dependencyResolver, loggerFactory) {
+        public EventPipeline(IDependencyResolver dependencyResolver, IOrganizationRepository organizationRepository, IProjectRepository projectRepository, IMetricsClient metricsClient, ILoggerFactory loggerFactory = null) : base(dependencyResolver, metricsClient, loggerFactory) {
             _organizationRepository = organizationRepository;
             _projectRepository = projectRepository;
-            _metricsClient = metricsClient;
         }
 
         public Task<EventContext> RunAsync(PersistentEvent ev, EventPostInfo epi = null) {
@@ -50,13 +49,13 @@ namespace Exceptionless.Core.Pipeline {
                 if (contexts.Any(c => c.Event.ProjectId != projectId))
                     throw new ArgumentException("All Project Ids must be the same for a batch of events.");
 
-                var project = await _projectRepository.GetByIdAsync(projectId, true).AnyContext();
+                var project = await _projectRepository.GetByIdAsync(projectId, o => o.Cache()).AnyContext();
                 if (project == null)
                     throw new DocumentNotFoundException(projectId, $"Unable to load project: \"{projectId}\"");
 
                 contexts.ForEach(c => c.Project = project);
 
-                var organization = await _organizationRepository.GetByIdAsync(project.OrganizationId, true).AnyContext();
+                var organization = await _organizationRepository.GetByIdAsync(project.OrganizationId, o => o.Cache()).AnyContext();
                 if (organization == null)
                     throw new DocumentNotFoundException(project.OrganizationId, $"Unable to load organization: \"{project.OrganizationId}\"");
 
@@ -66,21 +65,21 @@ namespace Exceptionless.Core.Pipeline {
                 });
 
                 // load organization settings into the context
-                foreach (var key in organization.Data.Keys)
+                foreach (string key in organization.Data.Keys)
                     contexts.ForEach(c => c.SetProperty(key, organization.Data[key]));
 
                 // load project settings into the context, overriding any organization settings with the same name
-                foreach (var key in project.Data.Keys)
+                foreach (string key in project.Data.Keys)
                     contexts.ForEach(c => c.SetProperty(key, project.Data[key]));
 
-                await _metricsClient.TimeAsync(async () => await base.RunAsync(contexts).AnyContext(), MetricNames.EventsProcessingTime).AnyContext();
+                await _metricsClient.TimeAsync(() => base.RunAsync(contexts), MetricNames.EventsProcessingTime).AnyContext();
 
-                var cancelled = contexts.Count(c => c.IsCancelled);
+                int cancelled = contexts.Count(c => c.IsCancelled);
                 if (cancelled > 0)
                     await _metricsClient.CounterAsync(MetricNames.EventsProcessCancelled, cancelled).AnyContext();
 
                 // TODO: Log the errors out to the events project id.
-                var errors = contexts.Count(c => c.HasError);
+                int errors = contexts.Count(c => c.HasError);
                 if (errors > 0)
                     await _metricsClient.CounterAsync(MetricNames.EventsProcessErrors, errors).AnyContext();
             } catch (Exception) {
