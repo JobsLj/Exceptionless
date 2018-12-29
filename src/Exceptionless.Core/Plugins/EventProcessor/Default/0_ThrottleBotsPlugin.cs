@@ -8,9 +8,9 @@ using Exceptionless.Core.Pipeline;
 using Exceptionless.DateTimeExtensions;
 using Foundatio.Caching;
 using Foundatio.Jobs;
-using Foundatio.Logging;
 using Foundatio.Queues;
 using Foundatio.Utility;
+using Microsoft.Extensions.Logging;
 
 namespace Exceptionless.Core.Plugins.EventProcessor {
     [Priority(0)]
@@ -25,23 +25,22 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
         }
 
         public override async Task EventBatchProcessingAsync(ICollection<EventContext> contexts) {
-            if (Settings.Current.WebsiteMode == WebsiteMode.Dev)
+            if (Settings.Current.AppMode == AppMode.Development)
                 return;
 
             var firstContext = contexts.First();
-            if (!firstContext.Project.DeleteBotDataEnabled)
+            if (!firstContext.Project.DeleteBotDataEnabled || !firstContext.IncludePrivateInformation)
                 return;
 
             // Throttle errors by client ip address to no more than X every 5 minutes.
-            var clientIpAddressGroups = contexts.Where(c => !String.IsNullOrEmpty(c.Event.GetRequestInfo()?.ClientIpAddress)).GroupBy(c => c.Event.GetRequestInfo().ClientIpAddress);
+            var clientIpAddressGroups = contexts.GroupBy(c => c.Event.GetRequestInfo()?.ClientIpAddress);
             foreach (var clientIpAddressGroup in clientIpAddressGroups) {
-                if (clientIpAddressGroup.Key.IsPrivateNetwork())
-                    return;
+                if (String.IsNullOrEmpty(clientIpAddressGroup.Key) || clientIpAddressGroup.Key.IsPrivateNetwork())
+                    continue;
 
                 var clientIpContexts = clientIpAddressGroup.ToList();
-
                 string throttleCacheKey = String.Concat("bot:", clientIpAddressGroup.Key, ":", SystemClock.UtcNow.Floor(_throttlingPeriod).Ticks);
-                var requestCount = await _cache.GetAsync<int?>(throttleCacheKey, null).AnyContext();
+                int? requestCount = await _cache.GetAsync<int?>(throttleCacheKey, null).AnyContext();
                 if (requestCount.HasValue) {
                     await _cache.IncrementAsync(throttleCacheKey, clientIpContexts.Count).AnyContext();
                     requestCount += clientIpContexts.Count;
@@ -51,9 +50,9 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
                 }
 
                 if (requestCount < Settings.Current.BotThrottleLimit)
-                    return;
+                    continue;
 
-                _logger.Info().Message("Bot throttle triggered. IP: {0} Time: {1} Project: {2}", clientIpAddressGroup.Key, SystemClock.UtcNow.Floor(_throttlingPeriod), firstContext.Event.ProjectId).Project(firstContext.Event.ProjectId).Write();
+                _logger.LogInformation("Bot throttle triggered. IP: {IP} Time: {ThrottlingPeriod} Project: {project}", clientIpAddressGroup.Key, SystemClock.UtcNow.Floor(_throttlingPeriod), firstContext.Event.ProjectId);
 
                 // The throttle was triggered, go and delete all the errors that triggered the throttle to reduce bot noise in the system
                 await _workItemQueue.EnqueueAsync(new ThrottleBotsWorkItem {

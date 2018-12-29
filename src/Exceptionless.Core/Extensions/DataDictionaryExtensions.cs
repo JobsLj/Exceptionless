@@ -32,12 +32,12 @@ namespace Exceptionless.Core.Extensions {
                 return data.ToType<T>();
             } catch {}
 
-            return default(T);
+            return default;
         }
 
         public static void RemoveSensitiveData(this DataDictionary extendedData) {
-            var removeKeys = extendedData.Keys.Where(k => k.StartsWith("-")).ToArray();
-            foreach (var key in removeKeys)
+            string[] removeKeys = extendedData.Keys.Where(k => k.StartsWith("-")).ToArray();
+            foreach (string key in removeKeys)
                 extendedData.Remove(key);
         }
     }

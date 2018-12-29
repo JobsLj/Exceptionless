@@ -1,5 +1,5 @@
 ﻿Param(
-  [string]$Version = "5.5.2",
+  [string]$Version = "5.6.10",
   [int]$NodeCount = 1,
   [bool]$StartKibana = $true,
   [int]$StartPort = 9200,
@@ -19,7 +19,7 @@ If (-Not (Test-Path -Path "elasticsearch-$Version") -And -Not (Test-Path -Path "
   Write-Output "Downloading Elasticsearch $Version..."
   Invoke-WebRequest "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-$Version.zip" -OutFile "elasticsearch-$Version.zip"
 } Else {
-  Write-Output "Using already downloaded Elasticsearch $Version..."
+  Write-Output "Using already downloaded Kibana $Version..."
 }
 
 If ((Test-Path -Path "elasticsearch-$Version.zip") -And !(Test-Path -Path "elasticsearch-$Version")) {
@@ -38,8 +38,15 @@ For ($i = 1; $i -le $NodeCount; $i++) {
     Copy-Item .\elasticsearch-$Version .\elasticsearch-$Version-node$i -Recurse
     Copy-Item .\elasticsearch.yml .\elasticsearch-$Version-node$i\config -Force
     Add-Content .\elasticsearch-$Version-node$i\config\elasticsearch.yml "`nhttp.port: $nodePort"
+    (Get-Content .\elasticsearch-$Version-node$i\config\jvm.options).replace('-Xms2g', '-Xms256m').replace('-Xmx2g', '-Xmx256m') | Set-Content .\elasticsearch-$Version-node$i\config\jvm.options
 
     Invoke-Expression ".\elasticsearch-$Version-node$i\bin\elasticsearch-plugin.bat install mapper-size"
+    if ($LastExitCode -ne 0) {
+      $host.SetShouldExit($LastExitCode)
+      Return
+    }
+
+    Invoke-Expression ".\elasticsearch-$Version-node$i\bin\elasticsearch-plugin.bat install x-pack --batch"
     if ($LastExitCode -ne 0) {
       $host.SetShouldExit($LastExitCode)
       Return

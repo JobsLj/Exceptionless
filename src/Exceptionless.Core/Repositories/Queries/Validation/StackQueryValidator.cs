@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Exceptionless.Core.Repositories.Configuration;
-using Foundatio.Logging;
 using Foundatio.Parsers.ElasticQueries.Visitors;
 using Foundatio.Parsers.LuceneQueries.Visitors;
+using Microsoft.Extensions.Logging;
 
 namespace Exceptionless.Core.Queries.Validation {
     public sealed class StackQueryValidator : QueryValidator {
@@ -69,7 +69,7 @@ namespace Exceptionless.Core.Queries.Validation {
                 return new QueryProcessResult { Message = "One or more aggregation fields are not allowed" };
 
             // Distinct queries are expensive.
-            if (info.Operations.TryGetValue(AggregationType.Cardinality, out ICollection<string> values) && values.Count > 3)
+            if (info.Operations.TryGetValue(AggregationType.Cardinality, out var values) && values.Count > 3)
                 return new QueryProcessResult { Message = "Cardinality aggregation count exceeded" };
 
             // Term queries are expensive.

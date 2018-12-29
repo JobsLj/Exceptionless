@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Messaging.Models;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Repositories.Options;
@@ -13,92 +12,95 @@ using Foundatio.Repositories.Elasticsearch.Configuration;
 using Foundatio.Repositories.Models;
 using Foundatio.Repositories.Options;
 using Foundatio.Repositories.Queries;
-using DataDictionary = Foundatio.Utility.DataDictionary;
 
 namespace Exceptionless.Core.Repositories {
     public abstract class RepositoryBase<T> : ElasticRepositoryBase<T> where T : class, IIdentity, new() {
-        public RepositoryBase(IIndexType<T> indexType, IValidator<T> validator) : base(indexType, validator) {}
-
-        protected override Task PublishChangeTypeMessageAsync(ChangeType changeType, T document, IDictionary<string, object> data = null, TimeSpan? delay = null) {
-          return PublishMessageAsync(new ExtendedEntityChanged {
-                ChangeType = changeType,
-                Id = document?.Id,
-                OrganizationId = (document as IOwnedByOrganization)?.OrganizationId,
-                ProjectId = (document as IOwnedByProject)?.ProjectId,
-                StackId = (document as IOwnedByStack)?.StackId,
-                Type = EntityTypeName,
-                Data = new DataDictionary(data ?? new Dictionary<string, object>())
-            }, delay);
+        public RepositoryBase(IIndexType<T> indexType, IValidator<T> validator) : base(indexType, validator) {
+            NotificationsEnabled = Settings.Current.EnableRepositoryNotifications;
         }
 
-        protected override async Task SendQueryNotificationsAsync(ChangeType changeType, IRepositoryQuery query, ICommandOptions options) {
+        protected override Task PublishChangeTypeMessageAsync(ChangeType changeType, T document, IDictionary<string, object> data = null, TimeSpan? delay = null) {
+            if (!NotificationsEnabled)
+                return Task.CompletedTask;
+
+            string organizationId = (document as IOwnedByOrganization)?.OrganizationId;
+            string projectId = (document as IOwnedByProject)?.ProjectId;
+            string stackId = (document as IOwnedByStack)?.StackId;
+            return PublishMessageAsync(CreateEntityChanged(changeType, organizationId, projectId, stackId, document?.Id, data), delay);
+        }
+
+        protected override Task SendQueryNotificationsAsync(ChangeType changeType, IRepositoryQuery query, ICommandOptions options) {
             if (!NotificationsEnabled || !options.ShouldNotify())
-                return;
+                return Task.CompletedTask;
 
             var delay = TimeSpan.FromSeconds(1.5);
             var organizations = query.GetOrganizations();
             var projects = query.GetProjects();
             var stacks = query.GetStacks();
             var ids = query.GetIds();
+            var tasks = new List<Task>();
 
+            string organizationId = organizations.Count == 1 ? organizations.Single() : null;
             if (ids.Count > 0) {
-                foreach (string id in ids) {
-                    await PublishMessageAsync(new ExtendedEntityChanged {
-                        ChangeType = changeType,
-                        Id = id,
-                        OrganizationId = organizations.Count == 1 ? organizations.Single() : null,
-                        ProjectId = projects.Count == 1 ? projects.Single() : null,
-                        StackId = stacks.Count == 1 ? stacks.Single() : null,
-                        Type = EntityTypeName
-                    }, delay).AnyContext();
-                }
+                string projectId = projects.Count == 1 ? projects.Single() : null;
+                string stackId = stacks.Count == 1 ? stacks.Single() : null;
 
-                return;
+                foreach (string id in ids)
+                    tasks.Add(PublishMessageAsync(CreateEntityChanged(changeType, organizationId, projectId, stackId, id), delay));
+
+                return Task.WhenAll(tasks);
             }
 
             if (stacks.Count > 0) {
-                foreach (string stackId in stacks) {
-                    await PublishMessageAsync(new ExtendedEntityChanged {
-                        ChangeType = changeType,
-                        OrganizationId = organizations.Count == 1 ? organizations.Single() : null,
-                        ProjectId = projects.Count == 1 ? projects.Single() : null,
-                        StackId = stackId,
-                        Type = EntityTypeName
-                    }, delay).AnyContext();
-                }
+                string projectId = projects.Count == 1 ? projects.Single() : null;
+                foreach (string stackId in stacks)
+                    tasks.Add(PublishMessageAsync(CreateEntityChanged(changeType, organizationId, projectId, stackId), delay));
 
-                return;
+                return Task.WhenAll(tasks);
             }
 
             if (projects.Count > 0) {
-                foreach (string projectId in projects) {
-                    await PublishMessageAsync(new ExtendedEntityChanged {
-                        ChangeType = changeType,
-                        OrganizationId = organizations.Count == 1 ? organizations.Single() : null,
-                        ProjectId = projectId,
-                        Type = EntityTypeName
-                    }, delay).AnyContext();
-                }
+                foreach (string projectId in projects)
+                    tasks.Add(PublishMessageAsync(CreateEntityChanged(changeType, organizationId, projectId), delay));
 
-                return;
+                return Task.WhenAll(tasks);
             }
 
             if (organizations.Count > 0) {
-                foreach (string organizationId in organizations) {
-                    await PublishMessageAsync(new ExtendedEntityChanged {
-                        ChangeType = changeType,
-                        OrganizationId = organizationId,
-                        Type = EntityTypeName
-                    }, delay).AnyContext();
-                }
+                foreach (string organization in organizations)
+                    tasks.Add(PublishMessageAsync(CreateEntityChanged(changeType, organization), delay));
 
-                return;
+                return Task.WhenAll(tasks);
             }
 
-            await PublishMessageAsync(new EntityChanged {
+            return PublishMessageAsync(new EntityChanged {
                 ChangeType = changeType,
                 Type = EntityTypeName
-            }, delay).AnyContext();
+            }, delay);
+        }
+
+        protected EntityChanged CreateEntityChanged(ChangeType changeType, string organizationId = null, string projectId = null, string stackId = null, string id = null, IDictionary<string, object> data = null) {
+            var model = new EntityChanged {
+                ChangeType = changeType,
+                Type = EntityTypeName,
+                Id = id
+            };
+
+            if (data != null) {
+                foreach (var kvp in data)
+                    model.Data[kvp.Key] = kvp.Value;
+            }
+
+            if (organizationId != null)
+                model.Data[ExtendedEntityChanged.KnownKeys.OrganizationId] = organizationId;
+
+            if (projectId != null)
+                model.Data[ExtendedEntityChanged.KnownKeys.ProjectId] = projectId;
+
+            if (stackId != null)
+                model.Data[ExtendedEntityChanged.KnownKeys.StackId] = stackId;
+
+            return model;
         }
     }
 }

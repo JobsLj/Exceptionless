@@ -66,11 +66,11 @@ namespace Exceptionless.Core.Models {
         }
 
         public override bool Equals(object obj) {
-            if (ReferenceEquals(null, obj))
+            if (obj is null)
                 return false;
             if (ReferenceEquals(this, obj))
                 return true;
-            if (obj.GetType() != this.GetType())
+            if (obj.GetType() != GetType())
                 return false;
             return Equals((Event)obj);
         }
@@ -116,6 +116,7 @@ namespace Exceptionless.Core.Models {
             public const string Level = "@level";
             public const string Location = "@location";
             public const string SubmissionMethod = "@submission_method";
+            public const string SubmissionClient = "@submission_client";
             public const string SessionEnd = "sessionend";
             public const string SessionHasError = "haserror";
             public const string ManualStackingInfo = "@stack";

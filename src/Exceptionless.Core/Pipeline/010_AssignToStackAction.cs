@@ -8,10 +8,10 @@ using Exceptionless.Core.Plugins.EventProcessor;
 using Exceptionless.Core.Plugins.Formatting;
 using Exceptionless.Core.Repositories;
 using Exceptionless.Core.Models;
-using Foundatio.Logging;
 using Foundatio.Messaging;
 using Foundatio.Repositories;
 using Foundatio.Repositories.Models;
+using Microsoft.Extensions.Logging;
 
 namespace Exceptionless.Core.Pipeline {
     [Priority(10)]
@@ -42,7 +42,7 @@ namespace Exceptionless.Core.Pipeline {
                     string signatureHash = ctx.StackSignatureData.Values.ToSHA1();
                     ctx.SignatureHash = signatureHash;
 
-                    if (stacks.TryGetValue(signatureHash, out Tuple<bool, Stack> value)) {
+                    if (stacks.TryGetValue(signatureHash, out var value)) {
                         ctx.Stack = value.Item2;
                     } else {
                         ctx.Stack = await _stackRepository.GetStackBySignatureHashAsync(ctx.Event.ProjectId, signatureHash).AnyContext();
@@ -51,7 +51,7 @@ namespace Exceptionless.Core.Pipeline {
                     }
 
                     if (ctx.Stack == null) {
-                        _logger.Trace("Creating new event stack.");
+                        _logger.LogTrace("Creating new event stack.");
                         ctx.IsNew = true;
 
                         string title = _formattingPluginManager.GetStackTitle(ctx.Event);
@@ -114,11 +114,13 @@ namespace Exceptionless.Core.Pipeline {
             if (stacksToAdd.Count > 0) {
                 await _stackRepository.AddAsync(stacksToAdd, o => o.Cache().Notifications(stacksToAdd.Count == 1)).AnyContext();
                 if (stacksToAdd.Count > 1) {
-                    await _publisher.PublishAsync(new ExtendedEntityChanged {
+                    await _publisher.PublishAsync(new EntityChanged {
                         ChangeType = ChangeType.Added,
                         Type = StackTypeName,
-                        OrganizationId = contexts.First().Organization.Id,
-                        ProjectId = contexts.First().Project.Id
+                        Data = {
+                            { ExtendedEntityChanged.KnownKeys.OrganizationId, contexts.First().Organization.Id },
+                            { ExtendedEntityChanged.KnownKeys.ProjectId, contexts.First().Project.Id }
+                        }
                     }).AnyContext();
                 }
             }

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Exceptionless.Core.Extensions;
@@ -7,10 +8,10 @@ using Exceptionless.Core.Repositories;
 using Foundatio.Caching;
 using Foundatio.Jobs;
 using Foundatio.Lock;
-using Foundatio.Logging;
 using Foundatio.Messaging;
 using Foundatio.Repositories;
 using Foundatio.Utility;
+using Microsoft.Extensions.Logging;
 
 namespace Exceptionless.Core.Jobs.WorkItemHandlers {
     public class ProjectMaintenanceWorkItemHandler : WorkItemHandlerBase {
@@ -30,7 +31,7 @@ namespace Exceptionless.Core.Jobs.WorkItemHandlers {
             const int LIMIT = 100;
 
             var workItem = context.GetData<ProjectMaintenanceWorkItem>();
-            Log.Info("Received upgrade projects work item. Update Default Bot List: {0} IncrementConfigurationVersion: {1}", workItem.UpdateDefaultBotList, workItem.IncrementConfigurationVersion);
+            Log.LogInformation("Received upgrade projects work item. Update Default Bot List: {UpdateDefaultBotList} IncrementConfigurationVersion: {IncrementConfigurationVersion}", workItem.UpdateDefaultBotList, workItem.IncrementConfigurationVersion);
 
             var results = await _projectRepository.GetAllAsync(o => o.PageLimit(LIMIT)).AnyContext();
             while (results.Documents.Count > 0 && !context.CancellationToken.IsCancellationRequested) {
@@ -40,9 +41,17 @@ namespace Exceptionless.Core.Jobs.WorkItemHandlers {
 
                     if (workItem.IncrementConfigurationVersion)
                         project.Configuration.IncrementVersion();
+
+                    if (workItem.RemoveOldUsageStats) {
+                        foreach (var usage in project.OverageHours.Where(u => u.Date < SystemClock.UtcNow.Subtract(TimeSpan.FromDays(3))).ToList())
+                            project.OverageHours.Remove(usage);
+
+                        foreach (var usage in project.Usage.Where(u => u.Date < SystemClock.UtcNow.Subtract(TimeSpan.FromDays(366))).ToList())
+                            project.Usage.Remove(usage);
+                    }
                 }
 
-                if (workItem.UpdateDefaultBotList)
+                if (workItem.UpdateDefaultBotList || workItem.IncrementConfigurationVersion || workItem.RemoveOldUsageStats)
                     await _projectRepository.SaveAsync(results.Documents).AnyContext();
 
                 // Sleep so we are not hammering the backend.

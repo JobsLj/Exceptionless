@@ -1,4 +1,4 @@
-﻿version: 4.1.{build}
+﻿version: 5.0.{build}
 os: Visual Studio 2017
 configuration: Release
 clone_depth: 2
@@ -7,6 +7,8 @@ pull_requests:
   do_not_increment_build_number: true
 
 environment:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
   JAVA_HOME: C:\Progra~1\Java\jdk1.8.0
   API_URL: https://#{api.hostheader}
   BUILD_REPO_URL:
@@ -20,27 +22,23 @@ init:
   - git config --global user.name "AppVeyor CI"
   - ps: $env:GIT_HASH = $env:APPVEYOR_REPO_COMMIT.Substring(0, 10)
 
-assembly_info:
-  patch: true
-  file: src\GlobalAssemblyInfo.cs
-  assembly_version: "{version}.0"
-  assembly_file_version: "{version}.0"
-  assembly_informational_version: "{version} $(GIT_HASH)"
+install:
+  - cmd: curl -O https://download.visualstudio.microsoft.com/download/pr/45f93081-cdb4-41c1-8d8d-e6c3bbf2872b/62d6a598956fdfe585acb1f15268d930/dotnet-sdk-2.1.403-win-x64.exe
+  - cmd: dotnet-sdk-2.1.403-win-x64.exe /install /quiet /norestart /log install.log
 
-before_build:
-  - nuget restore -verbosity quiet
-  - ps: .\build\Start-ElasticSearch.ps1 -NodeCount 1 -StartKibana $false
+build_script:
+  - ps: dotnet publish -c Release /p:BuildNumber=$env:APPVEYOR_BUILD_NUMBER
 
-build:
-  parallel: true
-  verbosity: quiet
+on_failure:
+#  - ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 
 before_test:
-  #- ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
+  - ps: .\build\Start-ElasticSearch.ps1 -StartKibana $false
 
-test:
-  assemblies:
-    - '**\*.Tests.dll'
+test_script:
+  - ps: Push-Location .\tests\Exceptionless.Tests
+  - ps: dotnet test -c Release --no-build
+  - ps: Pop-Location
 
 after_test:
   - ps: .\build\Push-Artifacts.ps1

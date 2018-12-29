@@ -11,7 +11,7 @@ namespace Exceptionless.Core.Extensions {
             if (String.IsNullOrEmpty(ip))
                 return false;
 
-            return String.Equals(ip, "::1") || String.Equals(ip, "127.0.0.1");
+            return String.Equals(ip, "127.0.0.1") || String.Equals(ip, "::1");
         }
 
         /// <summary>
@@ -66,13 +66,13 @@ namespace Exceptionless.Core.Extensions {
                 throw new ArgumentException("allowedChars may not be empty.");
 
             const int byteSize = 0x100;
-            var allowedCharSet = new HashSet<char>(allowedChars).ToArray();
+            char[] allowedCharSet = new HashSet<char>(allowedChars).ToArray();
             if (byteSize < allowedCharSet.Length)
                 throw new ArgumentException($"allowedChars may contain no more than {byteSize} characters.");
 
             using (var rng = new RNGCryptoServiceProvider()) {
                 var result = new StringBuilder();
-                var buf = new byte[128];
+                byte[] buf = new byte[128];
 
                 while (result.Length < length) {
                     rng.GetBytes(buf);
@@ -128,16 +128,15 @@ namespace Exceptionless.Core.Extensions {
         public static string ToSaltedHash(this string password, string salt) {
             byte[] passwordBytes = Encoding.Unicode.GetBytes(password);
             byte[] saltBytes = Convert.FromBase64String(salt);
-
-            var hashStrategy = HashAlgorithm.Create("HMACSHA256") as KeyedHashAlgorithm;
-            if (hashStrategy.Key.Length == saltBytes.Length)
+            var hashStrategy = new HMACSHA256();
+            if (hashStrategy.Key.Length == saltBytes.Length) {
                 hashStrategy.Key = saltBytes;
-            else if (hashStrategy.Key.Length < saltBytes.Length) {
-                var keyBytes = new byte[hashStrategy.Key.Length];
+            } else if (hashStrategy.Key.Length < saltBytes.Length) {
+                byte[] keyBytes = new byte[hashStrategy.Key.Length];
                 Buffer.BlockCopy(saltBytes, 0, keyBytes, 0, keyBytes.Length);
                 hashStrategy.Key = keyBytes;
             } else {
-                var keyBytes = new byte[hashStrategy.Key.Length];
+                byte[] keyBytes = new byte[hashStrategy.Key.Length];
                 for (int i = 0; i < keyBytes.Length;) {
                     int len = Math.Min(saltBytes.Length, keyBytes.Length - i);
                     Buffer.BlockCopy(saltBytes, 0, keyBytes, i, len);
@@ -145,6 +144,7 @@ namespace Exceptionless.Core.Extensions {
                 }
                 hashStrategy.Key = keyBytes;
             }
+
             byte[] result = hashStrategy.ComputeHash(passwordBytes);
             return Convert.ToBase64String(result);
         }
@@ -308,11 +308,11 @@ namespace Exceptionless.Core.Extensions {
             return builder.ToString();
         }
 
-        public static string[] SplitAndTrim(this string s, params char[] separator) {
+        public static string[] SplitAndTrim(this string s, char[] separator) {
             if (s.IsNullOrEmpty())
                 return new string[0];
 
-            var result = s.Split(separator, StringSplitOptions.RemoveEmptyEntries);
+            string[] result = s.Split(separator, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 0; i < result.Length; i++)
                 result[i] = result[i].Trim();
 

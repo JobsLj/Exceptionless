@@ -4,7 +4,7 @@ using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Pipeline;
 using Exceptionless.Core.Models.Data;
-using Foundatio.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Exceptionless.Core.Plugins.EventProcessor {
     [Priority(30)]
@@ -15,7 +15,7 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
             if (!context.Event.IsError())
                 return Task.CompletedTask;
 
-            SimpleError error = context.Event.GetSimpleError();
+            var error = context.Event.GetSimpleError();
             if (error == null)
                 return Task.CompletedTask;
             

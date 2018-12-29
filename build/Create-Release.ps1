@@ -40,28 +40,31 @@ If (Test-Path -Path $releaseTempDir) {
 }
 
 ROBOCOPY "$releaseArtifactsDir\api" "$releaseTempDir\wwwroot" /XD "$releaseArtifactsDir\api\.git" /XF "exceptionless.png" "favicon.ico" /S /NFL /NDL /NJH /NJS /nc /ns /np
-ROBOCOPY "$releaseArtifactsDir\app" "$releaseTempDir\wwwroot" /XD "$releaseArtifactsDir\app\.git" /S /XF "web.config" /NFL /NDL /NJH /NJS /nc /ns /np
+ROBOCOPY "$releaseArtifactsDir\app" "$releaseTempDir\wwwroot\wwwroot" /XD "$releaseArtifactsDir\app\.git" /S /XF "web.config" /NFL /NDL /NJH /NJS /nc /ns /np
 Copy-Item -Path "$base_dir\build\Start-ElasticSearch.ps1" -Destination $releaseTempDir
 Copy-Item -Path "$base_dir\build\elasticsearch.yml" -Destination $releaseTempDir
 Copy-Item -Path "$base_dir\build\elasticsearch.prod.yml" -Destination $releaseTempDir
 Copy-Item -Path "$base_dir\build\Start-Website.ps1" -Destination $releaseTempDir
-"PowerShell .\Start-Elasticsearch.ps1`r`nPowerShell .\Start-Website.ps1" | Out-File "$releaseTempDir\Start.bat" -Encoding "ascii"
+"PowerShell .\Start-Elasticsearch.ps1 -StartKibana $false`r`nPowerShell .\Start-Website.ps1" | Out-File "$releaseTempDir\Start.bat" -Encoding "ascii"
 Copy-Item -Path "$base_dir\build\readme.txt" -Destination $releaseTempDir
 
 Write-Host "Merging configuration"
 $webConfig = "$releaseTempDir\wwwroot\web.config"
-
 $apiConfig = [xml](Get-Content $webConfig)
-$apiConfig.SelectSingleNode('//appSettings/add[@key="BaseURL"]/@value').'#text' = 'http://localhost:50000/#'
-$apiConfig.SelectSingleNode('//appSettings/add[@key="EnableDailySummary"]/@value').'#text' = 'true'
-$apiConfig.SelectSingleNode('//system.web/compilation/@debug').'#text' = 'false'
 
 # Copy settings from app web.config
 $appConfig = [xml](Get-Content "$releaseArtifactsDir\app\web.config")
 $apiConfig.SelectSingleNode("configuration").AppendChild($apiConfig.ImportNode($appConfig.SelectSingleNode("configuration/location"), $true)) | Out-Null
 $apiConfig.SelectSingleNode("configuration/system.webServer").AppendChild($apiConfig.CreateComment($apiConfig.ImportNode($appConfig.SelectSingleNode("configuration/system.webServer/rewrite"), $true).OuterXml)) | Out-Null
-
 $apiConfig.Save($webConfig)
+
+$appProdSettings = "$releaseTempDir\wwwroot\appsettings.Production.yml"
+$prodConfig = (Get-Content $appProdSettings)
+$prodConfig = $prodConfig -Replace "BaseURL: https://be.exceptionless.io", "BaseURL: 'http://localhost:5000/#!'"
+$prodConfig = $prodConfig -Replace "MetricsServerName", "# MetricsServerName"
+$prodConfig = $prodConfig -Replace "ExceptionlessServerUrl", "# ExceptionlessServerUrl"
+$prodConfig = $prodConfig -Replace "InternalProjectId", "# InternalProjectId"
+Set-Content -Path $appProdSettings -Value $prodConfig
 
 Write-Host "Zipping release"
 If (Test-Path -Path "$releaseDir\Exceptionless.$($env:APPVEYOR_BUILD_VERSION).zip") {

@@ -7,7 +7,7 @@ using Exceptionless.Core.Extensions;
 using Exceptionless.Core.Models;
 using Exceptionless.Core.Models.Data;
 using Exceptionless.Core.Utility;
-using Foundatio.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Exceptionless.Core.Plugins.EventProcessor {
     [Priority(40)]
@@ -32,43 +32,44 @@ namespace Exceptionless.Core.Plugins.EventProcessor {
 
         public override async Task EventBatchProcessingAsync(ICollection<EventContext> contexts) {
             var project = contexts.First().Project;
-            var exclusions = project.Configuration.Settings.ContainsKey(SettingsDictionary.KnownKeys.DataExclusions)
-                    ? DefaultExclusions.Union(project.Configuration.Settings.GetStringCollection(SettingsDictionary.KnownKeys.DataExclusions)).ToList()
-                    : DefaultExclusions;
-            
+            var exclusions = DefaultExclusions.Union(project.Configuration.Settings.GetStringCollection(SettingsDictionary.KnownKeys.DataExclusions)).ToList();
             foreach (var context in contexts) {
                 var request = context.Event.GetRequestInfo();
                 if (request == null)
                     continue;
 
-                AddClientIpAddress(request, context.EventPostInfo?.IpAddress);
+                if (context.IncludePrivateInformation) {
+                    var submissionClient = context.Event.GetSubmissionClient();
+                    AddClientIpAddress(request, submissionClient);
+                } else {
+                    request.ClientIpAddress = null;
+                    request.Cookies?.Clear();
+                    request.PostData = null;
+                    request.QueryString?.Clear();
+                }
+
                 await SetBrowserOsAndDeviceFromUserAgent(request, context).AnyContext();
-                
                 context.Event.AddRequestInfo(request.ApplyDataExclusions(exclusions, MAX_VALUE_LENGTH));
             }
         }
 
-        private void AddClientIpAddress(RequestInfo request, string clientIpAddress) {
-            if (String.IsNullOrEmpty(clientIpAddress))
-                return;
-
-            if (clientIpAddress.IsLocalHost())
-                clientIpAddress = "127.0.0.1";
-
+        private void AddClientIpAddress(RequestInfo request, SubmissionClient submissionClient) {
             var ips = (request.ClientIpAddress ?? String.Empty)
                 .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(ip => ip.Trim())
-                .Where(ip => !ip.IsLocalHost())
                 .ToList();
 
-            if (ips.Count == 0 || !clientIpAddress.IsLocalHost())
-                ips.Add(clientIpAddress);
+            if (!String.IsNullOrEmpty(submissionClient?.IpAddress) && submissionClient.IsJavaScriptClient()) {
+                bool requestIpIsLocal = submissionClient.IpAddress.IsLocalHost();
+                if (ips.Count == 0 || !requestIpIsLocal && ips.Count(ip => !ip.IsLocalHost()) == 0)
+                    ips.Add(submissionClient.IpAddress);
+            }
 
             request.ClientIpAddress = ips.Distinct().ToDelimitedString();
         }
 
         private async Task SetBrowserOsAndDeviceFromUserAgent(RequestInfo request, EventContext context) {
-            var info = await _parser.ParseAsync(request.UserAgent, context.Project.Id).AnyContext();
+            var info = await _parser.ParseAsync(request.UserAgent).AnyContext();
             if (info != null) {
                 if (!String.Equals(info.UserAgent.Family, "Other")) {
                     request.Data[RequestInfo.KnownDataKeys.Browser] = info.UserAgent.Family;

@@ -31,7 +31,7 @@ namespace Exceptionless.Core.Extensions {
         }
 
         public static string BuildFilter(this IList<Project> projects) {
-            StringBuilder builder = new StringBuilder();
+            var builder = new StringBuilder();
             for (int index = 0; index < projects.Count; index++) {
                 if (index > 0)
                     builder.Append(" OR ");
@@ -87,7 +87,7 @@ namespace Exceptionless.Core.Extensions {
 
         public static void SetHourlyOverage(this Project project, double total, double blocked, double tooBig, int hourlyLimit) {
             var date = SystemClock.UtcNow.Floor(TimeSpan.FromHours(1));
-            project.OverageHours.SetUsage(date, (int)total, (int)blocked, (int)tooBig, hourlyLimit, TimeSpan.FromDays(32));
+            project.OverageHours.SetUsage(date, (int)total, (int)blocked, (int)tooBig, hourlyLimit, TimeSpan.FromDays(3));
         }
 
         public static void SetMonthlyUsage(this Project project, double total, double blocked, double tooBig, int monthlyLimit) {
